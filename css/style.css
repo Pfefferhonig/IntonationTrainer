@@ -650,6 +650,27 @@ details[open] > summary .help-chevron { transform: rotate(180deg); }
 .score-verdict { top: 0; font-size: 0.8rem; font-weight: 700; pointer-events: none; }
 .score-verdict:empty { display: none; }
 
+/* Odd one out: a reserved line under each note's label for its name after answering
+   (the space is always there, so the grid does not jump). */
+.score:not(.tscore) .score-note { min-height: 112px; }
+.score:not(.tscore) .score-label { bottom: 22px; }
+.score-name {
+  position: absolute;
+  left: -6px;
+  right: -6px;
+  bottom: 2px;
+  text-align: center;
+  font-size: 0.8rem;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.score-name .is-off { color: var(--bad-text); }
+.score-name-tune { margin-left: 4px; font-size: 0.74rem; opacity: 0.85; }
+
 /* The note head is a listen-only button: round, quiet, clearly not an answer. */
 .score-head-btn {
   position: relative;
@@ -1599,6 +1620,7 @@ fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
   .share-tasks ul { grid-template-columns: 1fr 1fr; }
   .compare .btn-yours { flex-basis: 100%; }
   .task-group-label { min-width: 0; width: 100%; }
+  .score-name-tune { display: none; } /* keep it to one compact line on phones */
   .share-tasks li { padding: 3px 8px; font-size: 0.74rem; }
   .nudge-end { display: none; }
   .tscore-lock { left: calc(50% + 20px); }

@@ -11,7 +11,7 @@ import { getSettings, onSettingsChange, getPref, setPref } from '../storage.js';
 import { el, setChildren, reveal } from '../ui/dom.js';
 import { icon } from '../ui/icons.js';
 import { segmented, helpBox, tagLink, installShortcuts, kbd } from '../ui/components.js';
-import { createPlayButton, nextButton, createFeedback, createLevelDisplay, soundedLine } from '../ui/exercise.js';
+import { createPlayButton, nextButton, createFeedback, createLevelDisplay } from '../ui/exercise.js';
 import { createPlayer } from '../ui/player.js';
 import { trackHighlights, chordPlan } from '../ui/highlight.js';
 import { chapterProgressPanel } from '../ui/chapter-progress.js';
@@ -82,7 +82,6 @@ export default {
 
     const level = createLevelDisplay({ label: 'Difference' });
     const feedback = createFeedback();
-    const sounded = el('div', { class: 'sounded' });
 
     // Shows 'Loading sound…' (recorded sounds) or a playback problem under the Play button.
     const loadLine = el('p', { class: 'stage-status', role: 'status' });
@@ -241,16 +240,19 @@ export default {
           onclick: () => playNote(index, 'played'),
         }, el('span', { class: 'score-head', 'aria-hidden': 'true' }), icon('volume-2', { size: 12, class: 'score-head-icon' }));
         const verdict = el('span', { class: 'score-verdict' });
+        // Note name, filled in only after answering (space reserved, so nothing jumps).
+        const nameEl = el('span', { class: 'score-name' });
         const row = el('div', { class: 'score-row' },
           flatBtn,
           el('div', { class: 'score-note' },
             verdict,
             headBtn,
             el('span', { class: 'score-label' }, name),
+            nameEl,
           ),
           sharpBtn,
         );
-        rows.push({ index, flatBtn, sharpBtn, headBtn, row, verdict, keys });
+        rows.push({ index, flatBtn, sharpBtn, headBtn, row, verdict, keys, nameEl });
         return row;
       });
       setChildren(score, rowEls);
@@ -282,7 +284,6 @@ export default {
       state = 'ready';
       playBtn.setLabel('Play');
       feedback.clear();
-      sounded.replaceChildren();
       score.classList.remove('is-answered');
       noneBtn.classList.remove('is-chosen', 'is-right', 'is-wrong');
       buildScore();
@@ -345,19 +346,22 @@ export default {
         if (!result.correct) noneBtn.classList.add('is-wrong');
       }
 
-      const note = rec && LEVEL_NOTE[rec.direction];
-      feedback.show({
-        correct: result.correct,
-        message: result.message,
-        details: note ? el('p', { class: 'feedback-note' }, note) : null,
-      });
+      // Note names in the rows (as played; the off note bold, with its in-tune name) + the chord name.
+      let chordName = '';
       if (typeof ooo.describe === 'function') {
         try {
           const desc = ooo.describe(question);
-          const heading = String(desc.title || '').replace(/\s*\(root[^)]*\)\s*$/i, '');
-          setChildren(sounded, soundedLine(desc, { heading }));
+          chordName = String(desc.title || '').replace(/\s*\(root[^)]*\)\s*$/i, '').replace(/#/g, '♯');
+          showNoteNames(desc);
         } catch (err) { console.error(err); }
       }
+      const note = rec && LEVEL_NOTE[rec.direction];
+      const extra = [chordName ? `${chordName.replace(/^./, (c) => c.toUpperCase())}.` : '', note || ''].filter(Boolean).join(' ');
+      feedback.show({
+        correct: result.correct,
+        message: result.message,
+        details: extra ? el('p', { class: 'feedback-note' }, extra) : null,
+      });
 
       // Compare section: with nothing off, as played = in tune, so just offer a replay.
       const odd = hasOdd() ? question.tones[question.oddIndex] : null;
@@ -377,6 +381,21 @@ export default {
       progressPanel.update();
       sync();
       next.focus(); // Enter/Space = Next; also scrolls it into view
+    }
+
+    function showNoteNames(desc) {
+      const pretty = (d) => String((d && d.text) || '').replace(/#/g, '♯').replace(/-/g, '−');
+      for (const r of rows) {
+        const n = desc.notes && desc.notes[r.index];
+        if (!n) { r.nameEl.replaceChildren(); continue; }
+        if (r.index === question.oddIndex) {
+          setChildren(r.nameEl,
+            el('strong', { class: 'is-off' }, pretty(n.played)),
+            n.inTune ? el('span', { class: 'score-name-tune' }, `→ in tune ${pretty(n.inTune)}`) : null);
+        } else {
+          setChildren(r.nameEl, pretty(n.played));
+        }
+      }
     }
 
     function safeStats() {
@@ -471,7 +490,6 @@ export default {
         score,
         noneBtn,
         feedback.element,
-        sounded,
         after,
       ),
       helpBox({ summary: 'How it works' },
