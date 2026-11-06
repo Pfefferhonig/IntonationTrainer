@@ -3,8 +3,10 @@
 //   "Sing the missing note" (progress key 'sing'): the Tune it yourself tasks, sung instead of slid.
 // Questions, feedback messages and persistence are shared with tune-it.js / error-store.js.
 
-import { randomRootFreq, describeFreq } from '../music/tuning.js';
-import { TUNE_TASKS, buildTaskQuestion, evaluate, describe, ratingFor } from './tune-it.js';
+import { randomRootFreq, describeFreq, formatCents, roundCents, rootName, shiftOctave, deviation } from '../music/tuning.js';
+import {
+  TUNE_TASKS, buildTaskQuestion, evaluate, describe, ratingFor, levelFor, producingMessage, spellTask, targetDeviation,
+} from './tune-it.js';
 import { createErrorStore } from './error-store.js';
 
 export const SING_MATCH_KEY = 'sing-match';
@@ -17,10 +19,11 @@ export const MIN_STEADY_SECONDS = 1.0;
 /** Voiced frames further apart than this (seconds) break a stretch. */
 export const MAX_GAP_SECONDS = 0.2;
 
-/** Plain reasons when a take cannot be measured. */
+/** Plain reasons when a recording cannot be measured (UX-WRITING error patterns). */
 export const TAKE_REASONS = Object.freeze({
-  'no-voice': 'No voice detected — check the microphone.',
-  'too-short': "We couldn't hear a steady note — try holding it for 2–3 seconds.",
+  'no-voice': "We didn't hear your voice. Check the microphone, then hold and sing again.",
+  'too-short': 'That was too short to measure. Hold the button and sing for 2–3 seconds.',
+  'cant-measure': "We couldn't measure that. Hold the button and sing again.",
 });
 
 /** The one "task" of Sing it back. */
@@ -201,18 +204,15 @@ export function analyzeTake(frames, { targetFreq, skipSeconds = 0.4 } = {}) {
 // Feedback
 // ---------------------------------------------------------------------------
 
-const centsText = (c) => {
-  const v = Math.round(Math.abs(c));
-  return `${v} ${v === 1 ? 'cent' : 'cents'}`;
-};
+const centsText = formatCents; // the one rule for showing cents (tuning.js)
 
-/** Plain sentence about how steady the held note was. */
+/** Plain sentence about how steady the held note was (second feedback line). */
 export function steadinessSentence(sd) {
-  const n = Math.max(1, Math.round(sd));
-  const c = `${n} ${n === 1 ? 'cent' : 'cents'}`;
-  if (n <= 8) return `Held steady within ±${c}.`;
+  const n = Math.abs(roundCents(sd));
+  const c = formatCents(n);
+  if (n <= 8) return `Held steady (±${c}).`;
   if (n <= 15) return `Fairly steady (±${c}).`;
-  return `Your note wobbled ±${c} — try a straighter tone.`;
+  return `Your note wobbled (±${c}). Try a straighter tone.`;
 }
 
 /** Friendly remark when the note was sung in another octave (null when not). */
@@ -220,77 +220,130 @@ export function octaveSentence(shift) {
   if (!shift) return null;
   const n = Math.abs(shift);
   const amount = n === 1 ? 'an octave' : n === 2 ? 'two octaves' : `${n} octaves`;
-  return `(You sang it ${amount} ${shift < 0 ? 'lower' : 'higher'} — that's fine.)`;
+  return `You sang ${amount} ${shift < 0 ? 'lower' : 'higher'} — that's fine.`;
 }
 
 /**
- * Feedback on a take: the same ratings (≤3, ≤7, ≤15 cents) and closer-to-tuning messages as
- * tune-it evaluate (descending included), plus a steadiness sentence and, when sung in another
- * octave, a friendly remark. Match questions: no tuning comparison (it is a unison), e.g.
- * "Spot on — 2 cents sharp of the note."
- * Not-ok analysis -> { ok: false, message: analysis.reason, rating: null, ... }.
+ * Feedback on a recording: the same levels, patterns and closer-to-other-tuning sentences as
+ * tune-it evaluate (descending included). message = first line; detail = second line: tip (sevenths),
+ * steadiness ('Held steady (±4 cents).') and, when sung in another octave, 'You sang an octave
+ * lower — that's fine.'. Echo: 'Spot on — 2 cents above the note.' / 'Good — … A touch lower next
+ * time.' / 'Close — … Try a little higher.' / 'Keep going — 24 cents below the note. Listen once more,
+ * then go higher.' (no tuning comparison: it is a unison).
+ * level: 'in-tune' (≤7 cents) | 'close' (≤15) | 'keep-going'.
+ * Not-ok analysis -> { ok: false, level: null, rating: null, message: analysis.reason, detail: null, ... }.
  * @param {object} question makeMatchQuestion / makeSingQuestion @param {object} analysis analyzeTake result
- * @returns {{ok: boolean, errorCents: number|null, absError: number|null, comparison: object|null,
- *   rating: string|null, message: string, midi: number|null, motion: string, steadinessCents: number|null,
- *   octaveShift: number, centsAboveRoot?: number, intervalCents?: number}}
  */
 export function evaluateSing(question, analysis) {
   if (!analysis || !analysis.ok) {
     return {
-      ok: false, errorCents: null, absError: null, comparison: null, rating: null,
-      message: (analysis && analysis.reason) || TAKE_REASONS['too-short'],
+      ok: false, errorCents: null, absError: null, comparison: null, rating: null, level: null,
+      message: (analysis && analysis.reason) || TAKE_REASONS['cant-measure'], detail: null,
       midi: null, motion: question.motion || 'up', steadinessCents: null, octaveShift: 0,
     };
   }
-  const tail = [steadinessSentence(analysis.steadinessCents), octaveSentence(analysis.octaveShift)].filter(Boolean).join(' ');
+  const second = [steadinessSentence(analysis.steadinessCents), octaveSentence(analysis.octaveShift)].filter(Boolean).join(' ');
   const midi = describeFreq(question.target.targetFreq).midi;
 
   if (question.kind === 'match') {
     const errorCents = 1200 * Math.log2(analysis.sungFreq / question.target.targetFreq);
     const absError = Math.abs(errorCents);
-    const rating = ratingFor(absError);
-    const where = Math.round(absError) === 0
-      ? 'right on the note'
-      : `${centsText(errorCents)} ${errorCents > 0 ? 'sharp' : 'flat'} of the note`;
     const hint = errorCents > 0 ? 'lower' : 'higher';
-    const lead = {
-      excellent: `Spot on — ${where}.`,
-      good: `Good — ${where}. A touch ${hint} next time.`,
-      close: `Close — ${where}. Try a little ${hint}.`,
-      off: `Not yet — ${where}. Try ${hint}, and listen to the note once more before you sing.`,
-    }[rating];
+    const message = producingMessage({ errorCents, target: 'the note', keepGoingTail: `Listen once more, then go ${hint}.` });
     return {
-      ok: true, errorCents, absError, comparison: null, rating, message: `${lead} ${tail}`,
-      midi, motion: 'up', steadinessCents: analysis.steadinessCents, octaveShift: analysis.octaveShift,
+      ok: true, errorCents, absError, comparison: null, rating: ratingFor(absError), level: levelFor(absError),
+      message, detail: second, midi, motion: 'up', steadinessCents: analysis.steadinessCents, octaveShift: analysis.octaveShift,
     };
   }
 
-  const r = evaluate(question, analysis.sungFreq, { verb: 'sang' });
+  const r = evaluate(question, analysis.sungFreq);
   return {
-    ok: true, ...r, message: `${r.message} ${tail}`,
+    ok: true, ...r, detail: [r.detail, second].filter(Boolean).join(' '),
     steadinessCents: analysis.steadinessCents, octaveShift: analysis.octaveShift,
   };
 }
 
 /**
+ * Hands-free singing (tap to start / tap to stop): should the recording end now?
+ * Ends after `silenceMs` without clear voice once at least `minVoiceMs` of voice was heard, or
+ * after `maxMs` in total. frames: [{ time (s), freq, clarity }] since the recording started.
+ * @param {object[]} frames @param {{silenceMs?: number, minVoiceMs?: number, maxMs?: number}} [opts]
+ * @returns {{end: boolean, reason: 'silence'|'max'|null, voicedMs: number, silentMs: number}}
+ */
+export function detectTakeEnd(frames, { silenceMs = 700, minVoiceMs = 2000, maxMs = 6000 } = {}) {
+  const list = (Array.isArray(frames) ? frames : []).filter((f) => f && finite(f.time)).sort((a, b) => a.time - b.time);
+  if (!list.length) return { end: false, reason: null, voicedMs: 0, silentMs: 0 };
+  const isVoiced = (f) => finite(f.freq) && f.freq > 0 && finite(f.clarity) && f.clarity >= SING_MIN_CLARITY;
+  const diffs = list.slice(1).map((f, i) => f.time - list[i].time).filter((d) => d > 0);
+  const dt = diffs.length ? Math.min(0.05, median(diffs)) : 0.02;
+  const voiced = list.filter(isVoiced);
+  const voicedMs = Math.round(voiced.length * dt * 1000);
+  const now = list[list.length - 1].time;
+  const lastVoice = voiced.length ? voiced[voiced.length - 1].time : null;
+  const silentMs = lastVoice === null ? Math.round((now - list[0].time) * 1000) : Math.round((now - lastVoice) * 1000);
+  if ((now - list[0].time) * 1000 >= maxMs - 1e-6) return { end: true, reason: 'max', voicedMs, silentMs };
+  if (voicedMs >= minVoiceMs && lastVoice !== null && silentMs >= silenceMs) return { end: true, reason: 'silence', voicedMs, silentMs };
+  return { end: false, reason: null, voicedMs, silentMs };
+}
+
+/**
  * Note names after a take: the target(s) and what was sung (in the octave actually sung).
  * -> { title, notes: [{ label, name, cents, played, inTune }], sung: 'You sang A3 +12' | null, octaveShift }
+ * (piano-grid names; kept until the UI uses the fields below), plus — design critique #1 —
+ * names spelled for the key / interval / chord and the deviation measured against the TARGET:
+ *   heading: 'The note: F♯4' (Echo) | tune-it heading ('Major third above D4', 'D major'),
+ *   chord: 'D major' | null,
+ *   tones: [{ label, name, deviation, secondary, isOff: false, isYours }] — given notes name only;
+ *     the last entry is what you sang (isYours, named in the octave actually sung),
+ *   yourNote: { name: 'D5', deviation: { cents, text: '8 cents above the note' }, secondary: null,
+ *               text: 'You sang D5 · 8 cents above the note' } | null (no usable take).
+ *   Join the chord: deviation '8 cents above pure' (chosen tuning), secondary '6 cents below piano'
+ *   when pure and piano differ by more than 3 cents.
  */
 export function describeSing(question, analysis) {
   const ok = analysis && analysis.ok;
   const sung = ok ? describeFreq(analysis.rawFreq) : null;
+  const shift = ok ? analysis.octaveShift : 0;
   if (question.kind === 'match') {
     const target = describeFreq(question.target.targetFreq);
     const played = sung || target;
+    const note = rootName(question.target.targetFreq);
+    const yours = ok ? shiftOctave(note, shift) : null;
+    const dev = ok ? deviation(analysis.sungCents, 'above the note', 'below the note', 'in tune') : null;
     return {
       title: `The note: ${target.text}`,
       notes: [{ label: 'The note', name: played.name, cents: played.cents, played, inTune: target }],
       sung: sung ? `You sang ${sung.text}` : null,
-      octaveShift: ok ? analysis.octaveShift : 0,
+      octaveShift: shift,
+      heading: `The note: ${note.name}`,
+      chord: null,
+      tones: [
+        { label: 'The note', name: note.name, deviation: null, secondary: null, isOff: false, isYours: false },
+        ...(ok ? [{ label: 'You sang', name: yours.name, deviation: dev, secondary: null, isOff: false, isYours: true }] : []),
+      ],
+      yourNote: ok ? { name: yours.name, deviation: dev, secondary: null, text: `You sang ${yours.name} \u00b7 ${dev.text}` } : null,
     };
   }
   const d = describe(question, ok ? analysis.rawFreq : undefined);
-  return { ...d, sung: sung ? `You sang ${sung.text}` : null, octaveShift: ok ? analysis.octaveShift : 0 };
+  const sp = spellTask(question);
+  const fixedTones = question.fixedTones.map((t, i) => ({ label: t.label, name: sp.fixed[i].name, deviation: null, secondary: null, isOff: false, isYours: false }));
+  let tones = [...fixedTones, { label: question.target.label, name: sp.target.name, deviation: null, secondary: null, isOff: false, isYours: true }];
+  let yourNote = null;
+  if (ok) {
+    const name = shiftOctave(sp.target, shift).name;
+    const { deviation: dev, secondary } = targetDeviation(question, analysis.sungFreq); // folded: vs the target octave
+    tones = [...fixedTones, { label: question.target.label, name, deviation: dev, secondary, isOff: false, isYours: true }];
+    yourNote = { name, deviation: dev, secondary, text: `You sang ${name} \u00b7 ${dev.text}` };
+  }
+  return {
+    ...d,
+    sung: sung ? `You sang ${sung.text}` : null,
+    octaveShift: shift,
+    heading: sp.heading,
+    chord: sp.chord,
+    tones,
+    yourNote,
+  };
 }
 
 // ---------------------------------------------------------------------------

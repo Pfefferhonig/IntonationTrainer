@@ -7,6 +7,7 @@
 import * as engine from './audio/engine.js';
 import { getSettings, onSettingsChange, getPref, setPref } from './storage.js';
 import { renderTabBar } from './ui/nav.js';
+import { isSingleKeyHint } from './ui/components.js';
 import setup from './screens/setup.js';
 import soundCheck from './screens/sound-check.js';
 import higherOrLower from './screens/higher-or-lower.js';
@@ -95,7 +96,7 @@ function render() {
 
   // Was the navigation started from the tab bar? Then keep focus there.
   const fromTabs = document.activeElement && document.activeElement.closest
-    && document.activeElement.closest('#tabbar');
+    && document.activeElement.closest('#tabbar, .bottom-nav');
 
   try {
     const cleanup = screen.render(container, params);
@@ -126,13 +127,66 @@ function render() {
 // setReverb is optional so the app still runs with an older engine.
 function applySound(s) {
   try { engine.setMasterVolume(s.volume); } catch (err) { console.error('setMasterVolume failed:', err); }
+  if (typeof engine.setAudioQuality === 'function') {
+    try { engine.setAudioQuality(s.audioQuality || 'auto'); } catch (err) { console.error('setAudioQuality failed:', err); }
+  }
   if (typeof engine.setReverb === 'function') {
     try { engine.setReverb(s.reverb); } catch (err) { console.error('setReverb failed:', err); }
   }
 }
 
+// "Skip to exercise": the hash is the router's, so move focus by hand.
+function wireSkipLink() {
+  const link = document.querySelector('.skip-link');
+  if (!link) return;
+  link.addEventListener('click', (e) => {
+    e.preventDefault();
+    const main = document.getElementById('app');
+    const target = main.querySelector('h1') || main;
+    if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+    target.focus();
+    target.scrollIntoView({ block: 'start' });
+  });
+}
+
+// The header is sticky on wide screens: share its height (--header-h) for other sticky bars.
+function trackHeaderHeight() {
+  const header = document.querySelector('.app-header');
+  if (!header) return;
+  const set = () => {
+    const sticky = getComputedStyle(header).position === 'sticky';
+    document.documentElement.style.setProperty('--header-h', sticky ? `${header.offsetHeight}px` : '0px');
+  };
+  set();
+  window.addEventListener('resize', set);
+  if (typeof ResizeObserver === 'function') new ResizeObserver(set).observe(header);
+}
+
+// Settings > Single-key shortcuts off: hide the letter/digit key badges (CSS .no-key-shortcuts).
+function applyKeyHints(s) {
+  document.documentElement.classList.toggle('no-key-shortcuts', s.keyShortcuts === false);
+}
+// Key badges made without kbd() still get .is-single-key.
+function markKeyBadges(root) {
+  if (!root || !root.querySelectorAll) return;
+  const list = root.matches && root.matches('kbd.kbd') ? [root] : root.querySelectorAll('kbd.kbd:not(.is-single-key)');
+  for (const k of list) if (isSingleKeyHint(k.textContent)) k.classList.add('is-single-key');
+}
+function watchKeyBadges() {
+  markKeyBadges(document.body);
+  if (typeof MutationObserver !== 'function') return;
+  new MutationObserver((records) => {
+    for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) markKeyBadges(n);
+  }).observe(document.body, { childList: true, subtree: true });
+}
+
 function start() {
+  wireSkipLink();
+  watchKeyBadges();
+  applyKeyHints(getSettings());
+  onSettingsChange(applyKeyHints);
   tabBar = renderTabBar(document.getElementById('tabbar'));
+  trackHeaderHeight();
   applySound(getSettings());
   onSettingsChange(applySound);
   window.addEventListener('hashchange', render);

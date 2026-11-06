@@ -34,24 +34,30 @@ export function makeNoiseGenerator(seed = 0x2f6b9a1d) {
  * tone itself; the engine's send gain then sets the wet level directly.
  *
  * @param {BaseAudioContext} ac
- * @param {{duration?: number, rt60?: number, predelay?: number, seed?: number}} [opts]
+ * @param {{duration?: number, rt60?: number, predelay?: number, seed?: number, channels?: number}} [opts]
  *   duration: buffer length in s; rt60: time to decay by 60 dB, in s;
- *   predelay: gap before the tail starts, in s.
+ *   predelay: gap before the tail starts, in s; channels: 2 (stereo room) or
+ *   1 (mono: half the convolution cost, for light mode).
  * @returns {AudioBuffer}
  */
-export function createRoomImpulse(ac, { duration = 1.4, rt60 = 1.2, predelay = 0.012, seed = 0x51ed2701 } = {}) {
+export function createRoomImpulse(ac, { duration = 1.4, rt60 = 1.2, predelay = 0.012, seed = 0x51ed2701, channels = 2 } = {}) {
   const sr = ac.sampleRate;
   const len = Math.max(2, Math.round(sr * duration));
-  const buf = ac.createBuffer(2, len, sr);
+  const nch = channels === 1 ? 1 : 2;
+  const buf = ac.createBuffer(nch, len, sr);
   const rand = makeNoiseGenerator(seed);
   const pre = Math.min(len - 1, Math.round(predelay * sr));
   const fadeIn = Math.max(1, Math.round(0.003 * sr));
   const fadeOut = Math.max(1, Math.round(0.08 * sr));
   const decayPerSample = Math.pow(10, -3 / (rt60 * sr)); // amplitude reaches -60 dB at rt60
 
+  // Filled in plain arrays and written with copyToChannel (write-only: never
+  // reads audio data back from the browser, which privacy shields may alter).
+  const chans = [];
   let energy = 0;
-  for (let ch = 0; ch < 2; ch++) {
-    const d = buf.getChannelData(ch);
+  for (let ch = 0; ch < nch; ch++) {
+    const d = new Float32Array(len);
+    chans.push(d);
     let env = 1;
     let y = 0;
     for (let i = pre; i < len; i++) {
@@ -69,10 +75,11 @@ export function createRoomImpulse(ac, { duration = 1.4, rt60 = 1.2, predelay = 0
       env *= decayPerSample;
     }
   }
-  const scale = energy > 0 ? 1 / Math.sqrt(energy / 2) : 0;
-  for (let ch = 0; ch < 2; ch++) {
-    const d = buf.getChannelData(ch);
+  const scale = energy > 0 ? 1 / Math.sqrt(energy / nch) : 0;
+  for (let ch = 0; ch < nch; ch++) {
+    const d = chans[ch];
     for (let i = 0; i < len; i++) d[i] *= scale;
+    buf.copyToChannel(d, ch);
   }
   return buf;
 }
@@ -87,8 +94,9 @@ export function createRoomImpulse(ac, { duration = 1.4, rt60 = 1.2, predelay = 0
 export function createNoiseBuffer(ac, seconds = 2) {
   const len = Math.max(1, Math.round(ac.sampleRate * seconds));
   const buf = ac.createBuffer(1, len, ac.sampleRate);
-  const d = buf.getChannelData(0);
+  const d = new Float32Array(len);
   const rand = makeNoiseGenerator(0x7a3c19e5);
   for (let i = 0; i < len; i++) d[i] = rand();
+  buf.copyToChannel(d, 0);
   return buf;
 }

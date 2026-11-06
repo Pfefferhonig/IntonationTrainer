@@ -9,23 +9,26 @@
   <!-- Icon: Lucide "audio-waveform" (ISC license, see docs/CREDITS.md) -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-4 -4 32 32'%3E%3Crect x='-4' y='-4' width='32' height='32' rx='8' fill='%232c5f8d'/%3E%3Cpath d='M2 13a2 2 0 0 0 2-2V7a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0V4a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0v-4a2 2 0 0 1 2-2' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/listening.css">
+  <link rel="stylesheet" href="css/producing.css">
   <script type="module" src="js/main.js"></script>
 </head>
 <body>
-  <header class="app-header">
+  <a class="skip-link" href="#app">Skip to exercise</a>
+  <header class="app-header" data-inset-top>
     <div class="container brand-row">
       <a class="brand" href="#/">
         <span class="brand-mark" aria-hidden="true">
           <!-- Lucide "audio-waveform", ISC license -->
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" focusable="false"><path d="M2 13a2 2 0 0 0 2-2V7a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0V4a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0v-4a2 2 0 0 1 2-2"/></svg>
         </span>
-        <span>Choir Intonation Trainer</span>
+        <span class="brand-text">Choir Intonation Trainer</span>
       </a>
     </div>
-    <nav id="tabbar" class="tabbar" aria-label="Chapters"></nav>
+    <nav id="tabbar" class="tabbar" aria-label="Exercises"></nav>
   </header>
 
-  <main id="app" class="container">
+  <main id="app" class="container" tabindex="-1">
     <p class="boot-msg" id="boot-msg">Loading&hellip;</p>
   </main>
 
@@ -43,7 +46,7 @@
         explain('This app cannot be opened by double-clicking index.html. Please double-click start.bat instead - it opens the app in your browser.');
       } else {
         setTimeout(function () {
-          explain('The app did not start. Try reloading the page. If this keeps happening, please use an up-to-date browser (Chrome, Edge, Firefox or Safari).');
+          explain('The app didn’t start. Reload the page. If that doesn’t help, use an up-to-date Chrome, Edge, Firefox or Safari.');
         }, 5000);
       }
     })();

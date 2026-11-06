@@ -11,6 +11,7 @@ export default {
       kind: 'missing',
       title: 'Join the chord',
       task: 'Some notes are fixed. Sing the missing note and hold it until it sounds calm.',
+      taskShort: 'Sing the missing note of a chord.',
     });
   },
 };

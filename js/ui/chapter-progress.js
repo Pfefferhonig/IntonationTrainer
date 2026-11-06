@@ -29,7 +29,7 @@ export function safeInsights(chapterKey) {
 /** "Your progress" for 'higher-or-lower' / 'odd-one-out' / 'odd-or-in-tune'. Returns { element, update() }. */
 export function chapterProgressPanel(chapterKey, { onReset, title, open } = {}) {
   return createProgressPanel({
-    what: 'this chapter',
+    what: 'this exercise',
     title,
     open,
     // Without onReset (stats page) the panel has no reset control.
@@ -44,11 +44,11 @@ export function chapterProgressPanel(chapterKey, { onReset, title, open } = {}) 
         rank: safeRank(chapterKey, stats),
         noData: !(stats.answered > 0),
         best,
-        bestLabel: 'Best result',
+        bestLabel: 'Finest difference',
         bestNote: best == null
-          ? 'Appears after a few ups and downs in difficulty.'
-          : 'The smallest difference you reliably heard.',
-        caption: 'Difference you worked at, per day (lower = finer hearing)',
+          ? 'Appears after a few more rounds.'
+          : 'The smallest difference you hear reliably. Smaller is better.',
+        caption: 'Difference per day — lower is better',
         unit: 'cents',
         points: (stats.history || [])
           .filter((d) => d && d.levelCents != null)
@@ -57,7 +57,7 @@ export function chapterProgressPanel(chapterKey, { onReset, title, open } = {}) 
             value: Number(d.levelCents),
             note: `${d.correct} of ${d.answered} right`,
           })),
-        empty: 'Answer a few questions to see your progress here.',
+        empty: 'Play a few rounds to see your progress here.',
         insights: safeInsights(chapterKey),
       };
     },

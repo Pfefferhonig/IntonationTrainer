@@ -1,58 +1,70 @@
 // "Odd one out" (#/odd-one-out)
-// A chord with exactly one note slightly sharp or flat — or, with "Include 'all in tune'",
-// possibly none: find it, then compare as played / in tune.
+// A chord with exactly one note slightly too high or too low — or, with "Sometimes all in tune",
+// possibly none: find it, then compare "As played" / "In tune" with a held chord that is
+// retuned in place (whole chord or just the off note).
+//
+// Shared interaction model (docs/BUILD-PLAN.md): Ready -> Presenting (answers locked until the
+// chord has sounded 300 ms; one by one: the last note + 300 ms) -> Answering -> Feedback -> Next.
 
-// Namespace imports: round-5 additions (describe, answerDetail, allowNone, sevenths) are feature-checked.
+// Namespace imports: newer exports are feature-checked with typeof.
 import * as ooo from '../exercise/odd-one-out.js';
-import { loadStaircase, recordResult, getStats } from '../exercise/progress.js';
-import { playChord, playTone } from '../audio/engine.js';
-import { TUNINGS, CHORDS, INTERVALS } from '../music/tuning.js';
+import * as progress from '../exercise/progress.js';
+import * as engine from '../audio/engine.js';
+import {
+  helpBox, tagLink, segmented, kbd, installShortcuts, onEscape, createOptionsSummary, keyLegend, createTipCard,
+  createCompareSwitch, createSessionSummary, refocusAfterPointerChange, refocusAfterClick,
+} from '../ui/components.js';
+import {
+  createPlayButton, nextButton, createFeedback, createLevelDisplay, createActionBar, playProgress, buttonBusy,
+} from '../ui/exercise.js';
+import { TUNINGS, CHORDS, INTERVALS, buildChord } from '../music/tuning.js';
 import { getSettings, onSettingsChange, getPref, setPref } from '../storage.js';
-import { el, setChildren, reveal } from '../ui/dom.js';
+import { el, setChildren, centsText, uniqueId, reveal } from '../ui/dom.js';
 import { icon } from '../ui/icons.js';
-import { segmented, helpBox, tagLink, installShortcuts, kbd } from '../ui/components.js';
-import { createPlayButton, nextButton, createFeedback, createLevelDisplay } from '../ui/exercise.js';
 import { createPlayer } from '../ui/player.js';
 import { trackHighlights, chordPlan } from '../ui/highlight.js';
 import { chapterProgressPanel } from '../ui/chapter-progress.js';
 import { voiceArg } from '../ui/voices.js';
-import { describeFreq } from '../ui/notes.js';
+import {
+  lxStopSound, lxLeadSeconds, lxLevelOf, lxMark, lxUnmark, lxLockAnswers, lxLevelNote, lxShouldTip, lxMakeEasier,
+  lxUpdateLevel, lxStageReveal, lxCompareSelect, lxPause, lxSingleKeysOn, lxSingleKey, lxWatchSingleKeys,
+  lxPrimaryPlacer, lxInlineLevel, lxTaskLine, lxFitsInView, lxCompareNoteSeen,
+} from './higher-or-lower.js';
 
 const MODES = {
-  odd: { key: 'odd-one-out', label: 'One note is off' },
-  maybe: { key: 'odd-or-in-tune', label: 'Maybe all in tune' },
+  odd: { key: 'odd-one-out' },
+  maybe: { key: 'odd-or-in-tune' },
 };
 const VARIANT_SUPPORTED = typeof ooo.describe === 'function';
 
 const CHORD_SECONDS = 4.5;    // full-chord part
 const ARPEGGIO_SECONDS = 0.6;
 const NOTE_SECONDS = 1.6;     // a single note heard alone
+const GATE_AFTER_ONSET_MS = 300;
+const COMPARE_MAX_SECONDS = 8;
+const RETUNE_SECONDS = 0.025;
 // Answer keys per row, counted from the BOTTOM row up (the keyboard's rows mirror the score):
-// bottom Z / X, then A / S, Q / W, and 1 / 2 for a fourth (top) note.
-const ROW_KEYS_FROM_BOTTOM = [['Z', 'X'], ['A', 'S'], ['Q', 'W'], ['1', '2']];
+// bottom Z / X, then A / S, Q / W. A fourth (top) note — the seventh — uses 7 / 8, which never
+// clash with the compare keys 1 / 2.
+const ROW_KEYS_FROM_BOTTOM = [['Z', 'X'], ['A', 'S'], ['Q', 'W'], ['7', '8']];
 const NONE_KEY = 'N';
 
 const CHORD_OPTIONS = [
   { value: 'major', label: 'Major' },
   { value: 'minor', label: 'Minor' },
-  { value: 'dom7', label: 'Dom 7th' },
-  { value: 'maj7', label: 'Maj 7th' },
-  { value: 'min7', label: 'Min 7th' },
+  { value: 'dom7', label: 'Dominant 7th' },
+  { value: 'maj7', label: 'Major 7th' },
+  { value: 'min7', label: 'Minor 7th' },
 ].filter((o) => Object.prototype.hasOwnProperty.call(CHORDS, o.value));
 const STYLE_OPTIONS = [
   { value: 'together', label: 'Together' },
   { value: 'arpeggio', label: 'One by one, then together' },
 ];
 
-const LEVEL_NOTE = {
-  harder: 'The next difference will be a little smaller.',
-  easier: 'The next difference will be a little bigger.',
-  same: '',
-};
-
-function tuningTagLabel(tuning) {
-  return tuning === TUNINGS.EQUAL ? 'Tuning: piano' : 'Tuning: pure (choir)';
-}
+const tuningWord = (tuning) => (tuning === TUNINGS.EQUAL ? 'Piano tuning' : 'Pure tuning');
+// Compare options are tuning keys ('just' | 'equal') besides 'played'.
+const tuningShort = (tuning) => (tuning === TUNINGS.EQUAL ? 'Piano' : 'Pure');
+const otherTuning = (tuning) => (tuning === TUNINGS.EQUAL ? TUNINGS.JUST : TUNINGS.EQUAL);
 
 // How much lower the barbershop (harmonic) seventh is than the piano's, for the help text.
 const SEVENTH_GAP = INTERVALS.h7 ? Math.round(INTERVALS.h7.equalCents - INTERVALS.h7.justCents) : 31;
@@ -62,7 +74,7 @@ export default {
   title: 'Odd one out',
 
   render(container) {
-    // "Include 'all in tune'": ON by default; a saved choice wins (also the older mode switch).
+    // "Sometimes all in tune": ON by default; a saved choice wins (also the older mode switch).
     let savedNone = getPref('oddOneOut.allowNone', null);
     if (typeof savedNone !== 'boolean') {
       const oldMode = getPref('oddOneOut.mode', null);
@@ -70,39 +82,67 @@ export default {
     }
     let mode = VARIANT_SUPPORTED && savedNone ? 'maybe' : 'odd';
     const modeKey = () => MODES[mode].key;
-    let staircase = loadStaircase(modeKey());
+    let activeKey = modeKey();
+    let staircase = progress.loadStaircase(activeKey);
     let chordKey = getPref('oddOneOut.chord', 'major');
     if (!CHORD_OPTIONS.some((o) => o.value === chordKey)) chordKey = 'major';
     let playStyle = getPref('oddOneOut.playStyle', 'together');
     if (!STYLE_OPTIONS.some((o) => o.value === playStyle)) playStyle = 'together';
 
     let question = null;
-    let state = 'ready'; // 'ready' | 'heard' | 'answered'
-    let rows = [];        // [{ index, flatBtn, sharpBtn, headBtn, row, verdict, keys }] top row first
+    // 'ready' | 'presenting' (answers locked) | 'answering' | 'feedback'
+    let state = 'ready';
+    let gatePassed = false;
+    let gateTimer = 0;
+    let stopProgress = null;
+    let cancelLevelAnim = null;
+    let missStreak = 0;
+    let rows = [];        // [{ index, flatBtn, sharpBtn, headBtn, row, keys, nameEl, devText, devEl }] top row first
+    let compare = null;
+    let otherFreqs = null; // the chord in the other tuning (same root), for the compare switch
+    let placer = null;
+    let sustain = null;   // held compare sound (engine.startSustain handle)
+    let compareStarting = false;
+    let compareValue = 'played';
+    let compareScope = 'chord';
+    let resolveBusy = null;
+    const timbre = () => getSettings().timbre;
+    const hasOdd = () => question && question.oddIndex >= 0;
 
     const level = createLevelDisplay({ label: 'Difference' });
+    const headLevel = el('span', { class: 'lx-head-level' });
     const feedback = createFeedback();
-
-    // Shows 'Loading sound…' (recorded sounds) or a playback problem under the Play button.
-    const loadLine = el('p', { class: 'stage-status', role: 'status' });
-    loadLine.hidden = true;
+    const legend = keyLegend();
+    const actionBar = createActionBar();
+    const summary = createSessionSummary({ every: 10, levelLabel: 'difference' });
+    const summarySlot = el('div', { class: 'lx-slot' });
+    const status = el('p', { class: 'stage-hint lx-status', role: 'status' });
+    const flashLine = el('p', { class: 'lx-flash', role: 'status' });
+    const tip = createTipCard({ text: 'Finding this hard? Make the difference a little bigger for a while.', actions: [] });
 
     const player = createPlayer({
       onChange: (s) => {
-        loadLine.textContent = s.error || (s.loading ? 'Loading sound…' : '');
-        loadLine.hidden = !loadLine.textContent;
-        loadLine.classList.toggle('is-error', !!s.error);
-        const tag = s.playing ? s.tag : null;
-        playBtn.setPlaying(tag === 'played' && state !== 'answered');
-        playedBtn.classList.toggle('is-playing', tag === 'played');
-        inTuneBtn.classList.toggle('is-playing', tag === 'in-tune');
-        notePlayedBtn.classList.toggle('is-playing', tag === 'note-played');
-        noteInTuneBtn.classList.toggle('is-playing', tag === 'note-in-tune');
-        score.classList.toggle('is-in-tune', tag === 'in-tune' || tag === 'note-in-tune');
-        if (s.playing && state === 'ready') {
-          state = 'heard';
-          playBtn.setLabel('Play again');
-          sync();
+        const loading = !!s.loading;
+        status.classList.toggle('is-error', !!s.error);
+        if (s.error) status.textContent = s.error;
+        else if (loading) status.textContent = 'Loading sound…';
+        else syncStatus();
+        if (loading && !resolveBusy) {
+          buttonBusy(state === 'feedback' ? compare && compare.element : playBtn.element,
+            new Promise((resolve) => { resolveBusy = resolve; }));
+        } else if (!loading && resolveBusy) {
+          resolveBusy();
+          resolveBusy = null;
+        }
+        playBtn.setPlaying(s.playing && s.tag === 'played');
+        if (s.playing || s.error) compareStarting = false;
+        if (!s.playing) {
+          if (stopProgress) { stopProgress(); stopProgress = null; }
+          if (!compareStarting) {
+            sustain = null;
+            if (compare) compare.setPlaying(false);
+            paintCompare();
+          }
         }
       },
     });
@@ -112,103 +152,188 @@ export default {
       for (const r of rows) r.row.classList.toggle('is-sounding', keys.has(r.index));
     }
 
-    const freqsOf = (which) => question.tones.map((t) => (which === 'correct' ? t.correctFreq : t.freq));
-    const hasOdd = () => question && question.oddIndex >= 0;
-
-    const chordStep = (tag, which) => ({
-      tag,
+    const chordStep = () => ({
+      tag: 'played',
       start: () => {
         const arpeggio = playStyle === 'arpeggio' ? ARPEGGIO_SECONDS : 0;
-        const h = playChord(freqsOf(which), { duration: CHORD_SECONDS, arpeggio, timbre: getSettings().timbre });
-        trackHighlights(h, chordPlan(question.tones.length, CHORD_SECONDS, arpeggio), lightUp);
+        const n = question.tones.length;
+        const h = engine.playChord(question.tones.map((t) => t.freq), { duration: CHORD_SECONDS, arpeggio, timbre: timbre() });
+        trackHighlights(h, chordPlan(n, CHORD_SECONDS, arpeggio), lightUp);
+        const lead = lxLeadSeconds(h);
+        if (stopProgress) stopProgress();
+        stopProgress = playProgress(playBtn.element, ((n - 1) * arpeggio + CHORD_SECONDS + lead) * 1000);
+        if (!gatePassed) {
+          clearTimeout(gateTimer);
+          gateTimer = setTimeout(openGate, (lead + (n - 1) * arpeggio) * 1000 + GATE_AFTER_ONSET_MS);
+        }
         return h;
       },
     });
-    const noteStep = (tag, index, which) => ({
-      tag,
+    const noteStep = (index) => ({
+      tag: 'note',
       start: () => {
-        const t = question.tones[index];
-        const h = playTone(which === 'correct' ? t.correctFreq : t.freq, { duration: NOTE_SECONDS, timbre: getSettings().timbre });
+        const h = engine.playTone(question.tones[index].freq, { duration: NOTE_SECONDS, timbre: timbre() });
         trackHighlights(h, [{ key: index, start: 0, end: NOTE_SECONDS }], lightUp);
         return h;
       },
     });
 
-    const playAsPlayed = () => player.play([chordStep('played', 'played')]);
-    const playInTune = () => player.play([chordStep('in-tune', 'correct')]);
-    const playNote = (index, which = 'played') => {
-      const odd = state === 'answered' && index === question.oddIndex;
-      const tag = odd ? (which === 'correct' ? 'note-in-tune' : 'note-played') : 'note';
-      return player.play([noteStep(tag, index, which)]);
-    };
+    function playChordAsPlayed() {
+      if (state === 'feedback') { lxCompareSelect(compare, 'played'); return; }
+      if (!gatePassed) state = 'presenting';
+      sync();
+      player.play([chordStep()]);
+      // The whole answer grid (+ "All in tune") in view, so answering never needs scrolling.
+      reveal(scoreHeading, score, noneBtn.hidden ? null : noneBtn);
+    }
+    const playNote = (index) => player.play([noteStep(index)]);
+
+    function openGate() {
+      if (state !== 'presenting') return;
+      gatePassed = true;
+      state = 'answering';
+      sync();
+    }
+
+    // ---------- Compare: one held chord, retuned in place ----------
+    // 'played' = as played; the chosen tuning = in tune (what the answer was judged against);
+    // the other tuning = the same chord, same root, tuned the other way.
+    const freqsFor = (value) => question.tones.map((t, i) => {
+      if (value === question.tuning) return t.correctFreq;
+      if (value === otherTuning(question.tuning) && otherFreqs && Number.isFinite(otherFreqs[i])) return otherFreqs[i];
+      return t.freq;
+    });
+    const othersOf = () => question.tones.map((_, i) => i).filter((i) => i !== question.oddIndex);
+    const sustainAlive = () => !!sustain && (typeof sustain.isPlaying === 'function' ? sustain.isPlaying() : player.playing);
+
+    function playCompare(value, scope) {
+      compareValue = value || 'played';
+      compareScope = scope === 'note' && hasOdd() ? 'note' : 'chord';
+      if (sustainAlive()) {
+        const freqs = freqsFor(compareValue);
+        if (typeof sustain.setFreqs === 'function') sustain.setFreqs(freqs, RETUNE_SECONDS);
+        else if (hasOdd()) sustain.setFreq(question.oddIndex, freqs[question.oddIndex], RETUNE_SECONDS);
+        if (hasOdd() && typeof sustain.setMuted === 'function') {
+          for (const i of othersOf()) sustain.setMuted(i, compareScope === 'note');
+        }
+        paintCompare();
+        return;
+      }
+      compareStarting = true;
+      player.play([{
+        tag: 'compare',
+        start: () => {
+          const muted = compareScope === 'note' ? othersOf() : [];
+          sustain = engine.startSustain(freqsFor(compareValue), { timbre: timbre(), maxDuration: COMPARE_MAX_SECONDS, muted });
+          paintCompare();
+          return sustain;
+        },
+      }]);
+      paintCompare();
+    }
+
+    // While the comparison sounds, the off note lights up and its label follows the sound.
+    function paintCompare() {
+      const on = sustainAlive() || (compareStarting && !!compare);
+      const inTune = on && (compareValue === question.tuning || (!hasOdd() && compareValue === 'played'));
+      const other = on && compareValue === otherTuning(question.tuning);
+      score.classList.toggle('is-compare-in-tune', inTune);
+      score.classList.toggle('is-compare-other', other);
+      for (const r of rows) {
+        const lit = on && (r.index === question.oddIndex || (!hasOdd() || compareScope === 'chord'));
+        r.row.classList.toggle('is-compare', lit);
+        if (r.index === question.oddIndex && r.devEl) {
+          // "E4 · 49 cents too high" -> "E4 · now in tune" -> "E4 · piano"
+          setChildren(r.devEl, inTune ? 'now in tune' : other ? tuningShort(compareValue).toLowerCase() : r.devText);
+          r.devEl.classList.toggle('is-in-tune', inTune);
+          r.devEl.classList.toggle('is-other', other);
+        }
+      }
+    }
 
     // ---------- Controls ----------
-    const playBtn = createPlayButton({ onClick: playAsPlayed, label: 'Play', shortcut: 'Space' });
-    const hint = el('p', { class: 'stage-hint' }, 'Press Play, then pick the note that is off. Tap a note head to hear that note alone.');
-    const score = el('div', { class: 'score', role: 'group', 'aria-label': 'Which note was out of tune?' });
+    const playBtn = createPlayButton({ onClick: () => playChordAsPlayed(), label: 'Play', shortcut: 'Space' });
+    // One line above the grid: chord name · "Tap a note to hear it alone".
+    const chordNameEl = el('span', { class: 'lx-chord-name' });
+    const scoreHeading = el('p', { class: 'lx-score-heading' }, chordNameEl,
+      el('span', { class: 'lx-score-caption' }, el('span', { class: 'lx-sep', 'aria-hidden': 'true' }, ' · '),
+        icon('volume-2', { size: 15 }), ' Tap a note to hear it',
+        el('span', { class: 'lx-caption-long' }, ' alone')));
+    const score = el('div', { class: 'score lx-score', role: 'group', 'aria-label': 'Which note was out of tune?' });
     const noneBtn = el('button', {
       type: 'button',
       class: 'btn btn-answer btn-none',
-      'aria-label': 'Answer: all notes were in tune',
       onclick: () => answer(-1, 'none'),
-    }, icon('check', { size: 20 }), el('span', { class: 'btn-answer-label' }, 'All in tune'), kbd(NONE_KEY));
+    }, icon('check', { size: 20 }), el('span', { class: 'btn-answer-label' }, 'All in tune'),
+    el('span', { class: 'visually-hidden' }, ' (no note was off)'), lxSingleKey(kbd(NONE_KEY)));
 
-    const playedBtn = el('button', { type: 'button', class: 'btn btn-compare', onclick: playAsPlayed },
-      icon('play', { size: 18 }), 'As played', kbd('1'));
-    const inTuneBtn = el('button', { type: 'button', class: 'btn btn-compare btn-in-tune', onclick: playInTune },
-      icon('check', { size: 18 }), 'In tune', kbd('2'));
-    const notePlayedBtn = el('button', { type: 'button', class: 'btn btn-compare', onclick: () => playNote(question.oddIndex, 'played') },
-      icon('play', { size: 18 }), 'As played', kbd('3'));
-    const noteInTuneBtn = el('button', { type: 'button', class: 'btn btn-compare btn-in-tune', onclick: () => playNote(question.oddIndex, 'correct') },
-      icon('check', { size: 18 }), 'In tune', kbd('4'));
-    const chordCompareLabel = el('span', { class: 'compare-label' }, 'Whole chord');
-    const noteCompareLabel = el('span', { class: 'compare-label' });
+    const next = nextButton(() => onNext());
+
+    const compareHolder = el('div', { class: 'lx-compare-holder' });
     const compareNote = el('p', { class: 'compare-note' });
-    const next = nextButton({ onClick: () => nextQuestion(true) });
-    const after = el('div', { class: 'after-answer' },
-      compareNote,
-      el('div', { class: 'compare-grid', role: 'group', 'aria-label': 'Compare as played and in tune' },
-        chordCompareLabel, playedBtn, inTuneBtn,
-        noteCompareLabel, notePlayedBtn, noteInTuneBtn,
-      ),
-      next,
-    );
+    const compareArea = el('div', { class: 'lx-compare' }, compareHolder, compareNote);
 
-    let tuningTag = tagLink({ href: '#/settings', label: tuningTagLabel(getSettings().tuning), title: 'Change tuning in Settings' });
+    // ---------- Options (folded into one line with "Change") ----------
+    let tuningTag = tagLink({ href: '#/settings', label: tuningWord(getSettings().tuning), title: 'Change in Settings' });
     const tagHolder = el('span', { class: 'tag-holder' }, tuningTag);
-
-    // "Include 'all in tune'" switch (remembered), like Higher / lower's "Include 'same'".
-    const noneToggle = el('input', { type: 'checkbox', role: 'switch', id: 'ooo-none' });
+    const modeNote = el('p', { class: 'small lx-option-help', role: 'status' });
+    const noneToggle = el('input', { type: 'checkbox', role: 'switch', id: uniqueId('ooo-none') });
     noneToggle.checked = mode === 'maybe';
-    noneToggle.addEventListener('change', () => switchMode(noneToggle.checked ? 'maybe' : 'odd'));
-    const noneSwitch = VARIANT_SUPPORTED
-      ? el('label', { class: 'switch', for: 'ooo-none' }, noneToggle, el('span', { class: 'switch-track', 'aria-hidden': 'true' }),
-        el('span', {}, 'Include "all in tune"'))
-      : null;
+    noneToggle.addEventListener('change', () => {
+      mode = noneToggle.checked ? 'maybe' : 'odd';
+      setPref('oddOneOut.allowNone', mode === 'maybe');
+      let lvl = null;
+      try { lvl = progress.loadStaircase(modeKey()).level(); } catch (err) { console.error(err); }
+      const amount = lvl != null ? ` — difference now ${centsText(lvl)}` : '';
+      modeNote.textContent = mode === 'maybe'
+        ? `Separate progress with this switch on${amount}.`
+        : `Back to your usual progress${amount}.`;
+      optionsChanged();
+    });
     const chordSeg = segmented({
-      name: 'ooo-chord',
-      legend: 'Chord',
-      options: CHORD_OPTIONS,
-      value: chordKey,
-      compact: true,
-      onChange: (v) => {
-        chordKey = v;
-        setPref('oddOneOut.chord', v);
-        player.stop();
-        newQuestion();
-      },
+      name: 'ooo-chord', legend: 'Chord', options: CHORD_OPTIONS, value: chordKey, compact: true,
+      onChange: (v) => { chordKey = v; setPref('oddOneOut.chord', v); optionsChanged(); },
     });
     const styleSeg = segmented({
-      name: 'ooo-style',
-      legend: 'Playback',
-      options: STYLE_OPTIONS,
-      value: playStyle,
-      compact: true,
-      onChange: (v) => {
-        playStyle = v;
-        setPref('oddOneOut.playStyle', v);
-      },
+      name: 'ooo-style', legend: 'Playback', options: STYLE_OPTIONS, value: playStyle, compact: true,
+      onChange: (v) => { playStyle = v; setPref('oddOneOut.playStyle', v); if (options) options.update(); },
     });
+    const options = createOptionsSummary({
+      title: 'Options',
+      getSummary: () => [
+        (CHORD_OPTIONS.find((o) => o.value === chordKey) || CHORD_OPTIONS[0]).label,
+        playStyle === 'arpeggio' ? 'one by one' : 'together',
+        VARIANT_SUPPORTED ? (mode === 'maybe' ? 'sometimes all in tune' : 'one note always off') : null,
+        tuningWord(getSettings().tuning).toLowerCase(),
+      ].filter(Boolean).join(' · '),
+      buildPanel: (panel) => {
+        panel.append(
+          VARIANT_SUPPORTED ? el('div', { class: 'lx-option' },
+            el('label', { class: 'switch', for: noneToggle.id }, noneToggle,
+              el('span', { class: 'switch-track', 'aria-hidden': 'true' }),
+              el('span', {}, 'Sometimes all in tune')),
+            modeNote) : null,
+          el('div', { class: 'options-row lx-options-row' }, chordSeg.element, styleSeg.element),
+          el('div', { class: 'lx-option' }, tagHolder),
+        );
+      },
+      onOpen: () => stopSound(),
+      returnFocus: () => primary(),
+    });
+
+    function optionsChanged() {
+      options.update();
+      if (state === 'ready' || state === 'presenting') {
+        stopSound();
+        newQuestion();
+      } else if (state === 'answering') {
+        stopSound();
+        newQuestion();
+        flash('New question with your new settings');
+      } else {
+        options.setPending(true);
+      }
+    }
 
     // ---------- Score (answer grid, highest note on top) ----------
     function buildScore() {
@@ -219,74 +344,139 @@ export default {
         const tone = question.tones[index];
         const keys = ROW_KEYS_FROM_BOTTOM[n - 1 - r] || [null, null];
         const name = tone.label;
+        const lower = name.toLowerCase();
         const flatBtn = el('button', {
-          type: 'button',
-          class: 'btn btn-accidental btn-flat',
-          'aria-label': `Answer: the ${name.toLowerCase()} was flat (too low)`,
-          onclick: () => answer(index, 'flat'),
-        }, el('span', { class: 'acc', 'aria-hidden': 'true' }, '♭'), el('span', {}, 'flat'), keys[0] ? kbd(keys[0]) : null);
+          type: 'button', class: 'btn btn-accidental btn-flat', onclick: () => answer(index, 'flat'),
+        }, el('span', { class: 'visually-hidden' }, `${name} `),
+        el('span', { class: 'acc', 'aria-hidden': 'true' }, '♭'), el('span', {}, 'flat'),
+        el('span', { class: 'visually-hidden' }, ' (too low)'), keys[0] ? lxSingleKey(kbd(keys[0])) : null);
         const sharpBtn = el('button', {
-          type: 'button',
-          class: 'btn btn-accidental btn-sharp',
-          'aria-label': `Answer: the ${name.toLowerCase()} was sharp (too high)`,
-          onclick: () => answer(index, 'sharp'),
-        }, el('span', { class: 'acc', 'aria-hidden': 'true' }, '♯'), el('span', {}, 'sharp'), keys[1] ? kbd(keys[1]) : null);
+          type: 'button', class: 'btn btn-accidental btn-sharp', onclick: () => answer(index, 'sharp'),
+        }, el('span', { class: 'visually-hidden' }, `${name} `),
+        el('span', { class: 'acc', 'aria-hidden': 'true' }, '♯'), el('span', {}, 'sharp'),
+        el('span', { class: 'visually-hidden' }, ' (too high)'), keys[1] ? lxSingleKey(kbd(keys[1])) : null);
         // Listening only — never answers.
         const headBtn = el('button', {
           type: 'button',
           class: 'score-head-btn',
-          'aria-label': `Listen: hear the ${name.toLowerCase()} alone`,
-          title: `Hear the ${name.toLowerCase()} alone`,
-          onclick: () => playNote(index, 'played'),
-        }, el('span', { class: 'score-head', 'aria-hidden': 'true' }), icon('volume-2', { size: 12, class: 'score-head-icon' }));
-        const verdict = el('span', { class: 'score-verdict' });
+          'aria-label': `Hear the ${lower} alone`,
+          title: `Hear the ${lower} alone`,
+          onclick: () => playNote(index),
+        }, el('span', { class: 'score-head', 'aria-hidden': 'true' }), icon('volume-2', { size: 14, class: 'score-head-icon' }));
         // Note name, filled in only after answering (space reserved, so nothing jumps).
-        const nameEl = el('span', { class: 'score-name' });
+        // Phones show the label in this line too ("Third E4 · too high"); wider screens show it above.
+        const nameEl = el('span', { class: 'score-name' }, el('span', { class: 'lx-name-label' }, name));
         const row = el('div', { class: 'score-row' },
           flatBtn,
           el('div', { class: 'score-note' },
-            verdict,
             headBtn,
             el('span', { class: 'score-label' }, name),
             nameEl,
           ),
           sharpBtn,
         );
-        rows.push({ index, flatBtn, sharpBtn, headBtn, row, verdict, keys, nameEl });
+        rows.push({ index, label: name, flatBtn, sharpBtn, headBtn, row, keys, nameEl, devText: null, devEl: null });
         return row;
       });
       setChildren(score, rowEls);
       score.classList.toggle('has-four', n >= 4);
     }
 
-    function sync() {
-      const canAnswer = state === 'heard';
-      for (const r of rows) {
-        r.flatBtn.disabled = !canAnswer;
-        r.sharpBtn.disabled = !canAnswer;
+    // ---------- State ----------
+    let flashTimer = 0;
+    function flash(text) {
+      flashLine.textContent = text;
+      clearTimeout(flashTimer);
+      flashTimer = setTimeout(() => { flashLine.textContent = ''; }, 3000);
+    }
+    function syncStatus() {
+      status.classList.remove('is-error');
+      if (state === 'ready') {
+        status.textContent = mode === 'maybe'
+          ? 'Press Play. Is one note off, or all in tune?'
+          : 'Press Play, then pick the note that is off.';
+      } else if (state === 'presenting') status.textContent = 'Listen to the end…';
+      else if (state === 'answering') {
+        status.textContent = mode === 'maybe' ? 'Which note is off — or is it all in tune?' : 'Which note is off, and which way?';
+      } else status.textContent = '';
+    }
+
+    function legendText() {
+      const single = lxSingleKeysOn();
+      if (state === 'ready') return 'Space or Enter: play';
+      if (state === 'presenting') return 'Listen to the end… · Esc: stop';
+      if (state === 'answering') {
+        if (!single) return 'Tab to a note’s ♭ / ♯ button · Space or Enter: play again';
+        const n = question.tones.length;
+        const pairs = ROW_KEYS_FROM_BOTTOM.slice(0, n).map((k) => k.join('/')).join(', ');
+        return [`♭/♯ from the bottom note up: ${pairs}`, mode === 'maybe' ? 'N all in tune' : null, 'R play again']
+          .filter(Boolean).join(' · ');
       }
-      noneBtn.hidden = mode !== 'maybe';
-      noneBtn.disabled = !canAnswer;
-      after.hidden = state !== 'answered';
-      hint.hidden = state !== 'ready';
-      hint.textContent = mode === 'maybe'
-        ? 'Press Play. Is one note off — or is everything in tune? Tap a note head to hear that note alone.'
-        : 'Press Play, then pick the note that is off. Tap a note head to hear that note alone.';
-      playBtn.element.hidden = state === 'answered';
+      const compareKeys = hasOdd() ? '1 / 2 / 3: as played / pure / piano' : '1 / 2: pure / piano';
+      return ['Enter: next', single ? compareKeys : null, 'Space: play / stop', 'Esc: stop'].filter(Boolean).join(' · ');
+    }
+
+    function sync() {
+      lxLockAnswers([...rows.flatMap((r) => [r.flatBtn, r.sharpBtn]), noneBtn], state);
+      score.classList.toggle('is-locked', state === 'presenting');
+      noneBtn.classList.toggle('is-locked', state === 'presenting');
+      // After answering, "All in tune" only stays when it was picked or was the answer (saves room).
+      const noneUsed = noneBtn.classList.contains('is-chosen') || (question && question.oddIndex < 0);
+      noneBtn.hidden = state === 'feedback' ? !noneUsed : (mode !== 'maybe' && !(question && question.oddIndex < 0));
+      compareArea.hidden = state !== 'feedback';
+      if (!stopProgress) playBtn.setLabel(gatePassed || state === 'presenting' ? 'Play again' : 'Play');
+      if (placer) placer.place(state === 'feedback' ? next.element : playBtn.element, { atTop: state !== 'feedback' });
+      legend.set(legendText());
+      syncStatus();
+    }
+
+    function stopSound() {
+      lxStopSound(player);
+      sustain = null;
+      if (compare && compare.playing) compare.setPlaying(false);
+      paintCompare();
+      if (state === 'presenting' && !gatePassed) {
+        clearTimeout(gateTimer);
+        state = 'ready';
+        sync();
+      }
+    }
+
+    function primary() { return state === 'feedback' ? next.element : playBtn.element; }
+    function focusPrimary() {
+      const p = primary();
+      if (p && p.isConnected && !p.disabled) p.focus({ preventScroll: true });
     }
 
     // ---------- Flow ----------
     function newQuestion() {
+      clearTimeout(gateTimer);
+      if (cancelLevelAnim) { cancelLevelAnim(); cancelLevelAnim = null; }
+      if (activeKey !== modeKey()) {
+        // "Sometimes all in tune" has its own progress (level, rank, insights).
+        activeKey = modeKey();
+        staircase = progress.loadStaircase(activeKey);
+        missStreak = 0;
+        buildPanel();
+      }
       const s = getSettings();
       const opts = { cents: staircase.level(), chordKey, tuning: s.tuning, voicePart: voiceArg(s) };
       if (VARIANT_SUPPORTED) opts.allowNone = mode === 'maybe';
       question = ooo.makeQuestion(opts);
       state = 'ready';
-      playBtn.setLabel('Play');
+      gatePassed = false;
+      sustain = null;
+      options.setPending(false);
       feedback.clear();
-      score.classList.remove('is-answered');
-      noneBtn.classList.remove('is-chosen', 'is-right', 'is-wrong');
+      lxStageReveal(stage, false);
+      score.classList.remove('is-answered', 'is-compare-in-tune', 'is-compare-other');
+      lxUnmark(noneBtn);
+      if (compare) { const c = compare; compare = null; c.destroy(); }
+      otherFreqs = null;
+      compareHolder.replaceChildren();
+      tip.hide();
       buildScore();
+      chordNameEl.textContent = `${(CHORD_OPTIONS.find((o) => o.value === chordKey) || CHORD_OPTIONS[0]).label} chord`;
       level.update(question.cents, safeStats());
       updateTag(s.tuning);
       sync();
@@ -294,116 +484,189 @@ export default {
 
     function nextQuestion(autoplay) {
       newQuestion();
-      // Bring the question (title, level, Play) back into view.
-      reveal(screen, playBtn.element);
       if (autoplay) {
-        playAsPlayed();
+        playChordAsPlayed();
         playBtn.element.focus({ preventScroll: true });
       }
+      reveal(screen.querySelector('.screen-head'), score, actionBar.element);
+    }
+
+    function onNext() {
+      const shown = summary.maybeShow(summarySlot, {
+        onKeepGoing: () => nextQuestion(true),
+        onDone: () => { window.location.hash = '#/stats'; },
+      });
+      if (!shown) nextQuestion(true);
     }
 
     function detailFor(index, direction) {
       if (typeof ooo.answerDetail === 'function') {
         try { return ooo.answerDetail(question, { index, direction }); } catch (err) { console.error(err); }
       }
-      const root = question.tones[0];
-      const odd = hasOdd() ? question.tones[question.oddIndex] : null;
-      const picked = index >= 0 ? question.tones[index] : null;
-      const d = describeFreq(root.correctFreq);
-      return {
-        midi: d ? d.midi : null,
-        toneLabel: odd ? odd.label : null,
-        direction: question.direction,
-        answer: picked && direction !== 'none' ? `${picked.label} ${direction}` : 'none',
-        chordKey: question.chordKey,
-        cents: question.cents,
-      };
+      return { midi: null, direction: question.direction, answer: direction, chordKey: question.chordKey, cents: question.cents };
     }
 
     function answer(index, direction) {
-      if (state !== 'heard') return;
-      if (direction === 'none' && mode !== 'maybe') return;
-      state = 'answered';
+      if (state === 'presenting') { flash('Listen to the end…'); return; }
+      if (state !== 'answering') return;
+      if (direction === 'none' && noneBtn.hidden) return;
+      state = 'feedback';
+      clearTimeout(gateTimer);
       const result = ooo.checkAnswer(question, { index, direction });
-      const rec = recordResult(modeKey(), staircase, { correct: result.correct, detail: detailFor(index, direction) });
+      const lvl = lxLevelOf(result);
+      const fromLevel = staircase.level();
+      const rec = progress.recordResult(activeKey, staircase, { correct: result.correct, detail: detailFor(index, direction) });
 
+      // 0 ms: button states (✓ on the right answer, neutral ✗ on a miss — never red).
       score.classList.add('is-answered');
       for (const r of rows) {
-        if (r.index === question.oddIndex) {
-          r.row.classList.add('is-odd');
-          r.verdict.textContent = question.direction === 'sharp' ? '♯ too high' : '♭ too low';
-          (question.direction === 'sharp' ? r.sharpBtn : r.flatBtn).classList.add('is-right');
-        }
-        if (r.index === index) {
-          const chosen = direction === 'sharp' ? r.sharpBtn : r.flatBtn;
-          chosen.classList.add('is-chosen');
-          if (!result.correct) chosen.classList.add('is-wrong');
+        const isOdd = r.index === question.oddIndex;
+        r.row.classList.toggle('is-odd', isOdd);
+        const rightBtn = isOdd ? (question.direction === 'sharp' ? r.sharpBtn : r.flatBtn) : null;
+        const chosenBtn = r.index === index ? (direction === 'sharp' ? r.sharpBtn : r.flatBtn) : null;
+        for (const b of [r.flatBtn, r.sharpBtn]) {
+          lxMark(b, { right: b === rightBtn, chosen: b === chosenBtn, level: lvl });
         }
       }
-      if (!hasOdd()) noneBtn.classList.add('is-right');
-      if (direction === 'none') {
-        noneBtn.classList.add('is-chosen');
-        if (!result.correct) noneBtn.classList.add('is-wrong');
-      }
+      // "All in tune" already shows a check mark of its own.
+      lxMark(noneBtn, { right: !hasOdd(), chosen: direction === 'none', level: lvl, iconWhenRight: false });
 
-      // Note names in the rows (as played; the off note bold, with its in-tune name) + the chord name.
-      let chordName = '';
+      // Note names spelled for the chord; deviation only on the off note.
       if (typeof ooo.describe === 'function') {
         try {
-          const desc = ooo.describe(question);
-          chordName = String(desc.title || '').replace(/\s*\(root[^)]*\)\s*$/i, '').replace(/#/g, '♯');
-          showNoteNames(desc);
+          const d = ooo.describe(question);
+          if (d && d.heading) chordNameEl.textContent = d.heading;
+          showNoteNames(d);
         } catch (err) { console.error(err); }
       }
-      const note = rec && LEVEL_NOTE[rec.direction];
-      const extra = [chordName ? `${chordName.replace(/^./, (c) => c.toUpperCase())}.` : '', note || ''].filter(Boolean).join(' ');
+
+      const note = rec ? lxLevelNote(activeKey, rec.direction) : '';
       feedback.show({
-        correct: result.correct,
+        level: lvl,
         message: result.message,
-        details: extra ? el('p', { class: 'feedback-note' }, extra) : null,
+        detail: note ? el('p', { class: 'feedback-note' }, note) : null,
       });
 
-      // Compare section: with nothing off, as played = in tune, so just offer a replay.
-      const odd = hasOdd() ? question.tones[question.oddIndex] : null;
-      inTuneBtn.hidden = !odd;
-      noteCompareLabel.hidden = !odd;
-      notePlayedBtn.hidden = !odd;
-      noteInTuneBtn.hidden = !odd;
-      setChildren(playedBtn, icon('play', { size: 18 }), odd ? 'As played' : 'Hear it again', kbd('1'));
-      if (odd) {
-        const oddName = odd.label.toLowerCase();
-        noteCompareLabel.textContent = `The ${oddName} alone`;
-        compareNote.textContent = `Flip between "as played" and "in tune" and listen to the ${oddName}: hear how it settles into the chord.`;
-      } else {
-        compareNote.textContent = 'Every note was in tune — listen again to how calm a well-tuned chord sounds.';
-      }
-      level.update(rec ? rec.level : staircase.level(), rec ? rec.stats : safeStats());
+      buildCompare();
+      const levelNow = rec ? rec.level : staircase.level();
+      summary.record({ correct: result.correct, levelCents: levelNow });
+      cancelLevelAnim = lxUpdateLevel(level, {
+        from: fromLevel, to: levelNow, stats: rec ? rec.stats : safeStats(),
+        direction: rec && rec.moved !== false ? rec.direction : null,
+      });
       progressPanel.update();
+      const streak = rec && rec.stats && Number.isFinite(rec.stats.missStreak) ? rec.stats.missStreak : null;
+      missStreak = streak != null ? streak : (result.correct ? 0 : missStreak + 1);
+      maybeTip();
       sync();
-      next.focus(); // Enter/Space = Next; also scrolls it into view
+      lxStageReveal(stage);
+      const oddRow = rows.find((r) => r.index === question.oddIndex);
+      const keepRow = oddRow && lxFitsInView(oddRow.row, compareArea) ? oddRow.row : null;
+      next.focusAfterFeedback(feedback.id, keepRow, compareArea);
     }
 
+    // Name line under each label: "D4"; the off note "A4 · 49 cents too high" (phones: "A4 · too high";
+    // the amount is in the feedback message). While "In tune" sounds it reads "A4 · now in tune".
     function showNoteNames(desc) {
-      const pretty = (d) => String((d && d.text) || '').replace(/#/g, '♯').replace(/-/g, '−');
+      const tones = desc && Array.isArray(desc.tones) ? desc.tones : null;
       for (const r of rows) {
-        const n = desc.notes && desc.notes[r.index];
-        if (!n) { r.nameEl.replaceChildren(); continue; }
-        if (r.index === question.oddIndex) {
-          setChildren(r.nameEl,
-            el('strong', { class: 'is-off' }, pretty(n.played)),
-            n.inTune ? el('span', { class: 'score-name-tune' }, `→ in tune ${pretty(n.inTune)}`) : null);
+        const t = tones && tones[r.index];
+        r.devText = null;
+        r.devEl = null;
+        const label = el('span', { class: 'lx-name-label' }, `${r.label} `);
+        if (!t) { setChildren(r.nameEl, label); continue; }
+        const name = el('span', { class: 'lx-note-name' }, t.name || '');
+        if (t.isOff && t.deviation) {
+          const c = Math.abs(Number(t.deviation.cents));
+          const way = t.deviation.cents > 0 ? 'too high' : 'too low';
+          r.devText = Number.isFinite(c) ? [el('span', { class: 'lx-dev-amount' }, `${centsText(c)} `), way] : [t.deviation.text];
+          r.devEl = el('span', { class: 'lx-dev' }, r.devText);
+          setChildren(r.nameEl, label, name, el('span', { class: 'lx-sep', 'aria-hidden': 'true' }, ' · '), r.devEl);
         } else {
-          setChildren(r.nameEl, pretty(n.played));
+          setChildren(r.nameEl, label, name);
         }
       }
+    }
+
+    function buildCompare() {
+      const odd = hasOdd() ? question.tones[question.oddIndex] : null;
+      const oddName = odd ? odd.label.toLowerCase() : '';
+      compareValue = 'played';
+      compareScope = 'chord';
+      // The same chord in the other tuning: same root, buildChord in the other tuning (low -> high,
+      // like question.tones).
+      const mine = question.tuning === TUNINGS.EQUAL ? TUNINGS.EQUAL : TUNINGS.JUST;
+      const theirs = otherTuning(mine);
+      try {
+        const root = question.tones.find((t) => t.intervalKey === 'P1') || question.tones[0];
+        const chord = buildChord(root.correctFreq, question.chordKey, theirs);
+        otherFreqs = chord.length === question.tones.length ? chord.map((t) => t.freq) : null;
+      } catch (err) {
+        console.error(err);
+        otherFreqs = null;
+      }
+      // Fixed order Pure | Piano (as in Lock it in); the chosen tuning is marked as the in-tune one.
+      const tuningOption = (t, key) => ({
+        value: t,
+        label: t === mine ? `${tuningShort(t)} (${odd ? 'in tune' : 'as played'})` : tuningShort(t),
+        key,
+      });
+      const tuningOptions = otherFreqs ? [TUNINGS.JUST, TUNINGS.EQUAL] : [mine];
+      const options = odd
+        ? [{ value: 'played', label: 'As played', key: '1' }, ...tuningOptions.map((t, i) => tuningOption(t, String(i + 2)))]
+        : tuningOptions.map((t, i) => tuningOption(t, String(i + 1)));
+      compare = createCompareSwitch({
+        label: odd ? `Compare the ${oddName} as played, pure and piano` : 'Compare pure and piano',
+        options,
+        scopes: odd ? [{ value: 'chord', label: 'Whole chord' }, { value: 'note', label: `Just the ${oddName}` }] : undefined,
+        onChange: (value, scope) => playCompare(value, scope),
+        onStop: () => { lxStopSound(player); sustain = null; paintCompare(); },
+      });
+      // "(in tune)" / "(as played)" as a small tag, so it can sit on its own line on phones.
+      const mineInput = Array.from(compare.element.querySelectorAll('input[type="radio"]')).find((i) => i.value === mine);
+      const mineText = mineInput && mineInput.nextElementSibling && mineInput.nextElementSibling.querySelector('span');
+      if (mineText) {
+        setChildren(mineText, tuningShort(mine), ' ',
+          el('span', { class: 'lx-tune-tag' }, odd ? '(in tune)' : '(as played)'));
+      }
+      compareHolder.replaceChildren(compare.element);
+      compareNote.textContent = odd
+        ? `Switch versions and listen to the ${oddName} settle into the chord. Pure is how a choir tunes; piano has equal steps.`
+        : 'Every note was in tune. Compare: pure is how a choir tunes; piano has equal steps.';
+      lxCompareNoteSeen('odd-one-out', compareNote);
+    }
+
+    function maybeTip() {
+      if (!lxShouldTip(activeKey, missStreak)) return;
+      const key = activeKey;
+      tip.set({
+        actions: [
+          {
+            label: 'Make it easier',
+            onClick: () => {
+              const st = lxMakeEasier(key);
+              if (st && key === activeKey) {
+                staircase = st;
+                missStreak = 0;
+                if (cancelLevelAnim) { cancelLevelAnim(); cancelLevelAnim = null; }
+                level.update(staircase.level(), safeStats());
+                flash('Next difference: a little bigger.');
+              }
+              next.element.focus({ preventScroll: true });
+            },
+          },
+          { label: 'Not now', onClick: () => { next.element.focus({ preventScroll: true }); } },
+        ],
+      });
+      tip.show();
     }
 
     function safeStats() {
-      try { return getStats(modeKey()); } catch (err) { console.error(err); return null; }
+      try { return progress.getStats(activeKey); } catch (err) { console.error(err); return null; }
     }
 
     function updateTag(tuning) {
-      const fresh = tagLink({ href: '#/settings', label: tuningTagLabel(tuning), title: 'Change tuning in Settings' });
+      const fresh = tagLink({ href: '#/settings', label: tuningWord(tuning), title: 'Change in Settings' });
       tuningTag.replaceWith(fresh);
       tuningTag = fresh;
     }
@@ -411,24 +674,20 @@ export default {
     const unsubscribe = onSettingsChange((s) => {
       // A tuning change applies from the next question on; show it right away.
       updateTag(s.tuning);
+      options.update();
     });
 
-    const taskLine = el('p', { class: 'task' });
-    function renderTask() {
-      taskLine.textContent = mode === 'maybe'
-        ? 'Is one note of the chord out of tune — and which way? Or is everything in tune?'
-        : 'One note of the chord is out of tune. Which one — and is it too low (♭ flat) or too high (♯ sharp)?';
-    }
-    renderTask();
+    const taskLine = lxTaskLine('One note is out of tune. Which one — and is it too high or too low?',
+      'Which note is off — too high or too low?');
 
     // Each mode has its own progress (staircase, rank, insights).
     const panelHolder = el('div', { class: 'panel-holder' });
     let progressPanel = null;
     function buildPanel() {
-      progressPanel = chapterProgressPanel(modeKey(), {
+      progressPanel = chapterProgressPanel(activeKey, {
         onReset: () => {
-          player.stop();
-          staircase = loadStaircase(modeKey());
+          stopSound();
+          staircase = progress.loadStaircase(activeKey);
           newQuestion();
         },
       });
@@ -436,82 +695,115 @@ export default {
     }
     buildPanel();
 
-    function switchMode(v) {
-      if (v === mode) return;
-      mode = v;
-      renderTask();
-      setPref('oddOneOut.allowNone', v === 'maybe');
-      player.stop();
-      staircase = loadStaircase(modeKey());
-      buildPanel();
-      newQuestion();
-    }
-
-    // ---------- Keyboard ----------
-    const removeShortcuts = installShortcuts((e) => {
-      const k = e.key.length === 1 ? e.key.toUpperCase() : e.key;
-      if (k === ' ' || k === 'Enter') {
-        if (state === 'answered') nextQuestion(true);
-        else playAsPlayed();
-        return true;
+    // ---------- Keyboard (the compare switch handles 1 / 2 and Space itself in Feedback) ----------
+    const answerKey = (k) => {
+      if (state !== 'answering' && state !== 'presenting') return false;
+      const key = k.toUpperCase();
+      for (const r of rows) {
+        if (key === r.keys[0]) { answer(r.index, 'flat'); return true; }
+        if (key === r.keys[1]) { answer(r.index, 'sharp'); return true; }
       }
-      if (state === 'heard') {
-        for (const r of rows) {
-          if (k === r.keys[0]) { answer(r.index, 'flat'); return true; }
-          if (k === r.keys[1]) { answer(r.index, 'sharp'); return true; }
-        }
-        if (k === NONE_KEY && mode === 'maybe') { answer(-1, 'none'); return true; }
-      }
-      if (state === 'answered') {
-        if (k === '1') { playAsPlayed(); return true; }
-        if (k === '2' && hasOdd()) { playInTune(); return true; }
-        if (k === '3' && hasOdd()) { playNote(question.oddIndex, 'played'); return true; }
-        if (k === '4' && hasOdd()) { playNote(question.oddIndex, 'correct'); return true; }
-      }
-      if (k === 'R') { playAsPlayed(); return true; }
+      if (key === NONE_KEY && !noneBtn.hidden) { answer(-1, 'none'); return true; }
       return false;
+    };
+    const shortcutMap = {
+      ' ': () => {
+        if (state === 'feedback' || pause.isShown) return false;
+        playChordAsPlayed();
+        return true;
+      },
+      Enter: () => {
+        if (pause.isShown) return false;
+        if (state === 'feedback') next.trigger();
+        else playChordAsPlayed();
+        return true;
+      },
+      r: () => {
+        if (pause.isShown) return false;
+        playChordAsPlayed();
+        return true;
+      },
+    };
+    for (const k of [...ROW_KEYS_FROM_BOTTOM.flat(), NONE_KEY]) shortcutMap[k.toLowerCase()] = () => answerKey(k);
+    const removeShortcuts = installShortcuts(shortcutMap, {});
+    // Esc: stop the sound (the options panel and the compare switch handle their own Esc first).
+    const removeEscape = onEscape(() => {
+      if (!player.playing && state !== 'presenting') return false;
+      stopSound();
+      return true;
+    });
+
+    // ---------- Paused ----------
+    const pause = lxPause({
+      isBusy: () => player.playing || state === 'presenting',
+      onHide: () => stopSound(),
+      onContinue: () => focusPrimary(),
     });
 
     // ---------- Layout ----------
-    const screen = el('section', { class: 'screen exercise' },
+    const stage = el('div', { class: 'stage lx-stage' },
+      pause.element,
+      status,
+      scoreHeading,
+      score,
+      noneBtn,
+      flashLine,
+      feedback.element,
+      compareArea,
+      tip.element,
+      summarySlot,
+      actionBar.element,
+      legend.element,
+    );
+    const screen = el('section', { class: 'screen exercise lx-screen lx-ooo' },
       el('div', { class: 'screen-head' },
         el('div', {},
-          el('h1', {}, 'Odd one out'),
+          el('h1', {}, 'Odd one out', headLevel),
           taskLine,
         ),
         level.element,
       ),
-      noneSwitch ? el('div', { class: 'options-row' }, noneSwitch) : null,
-      el('div', { class: 'options-row' }, chordSeg.element, styleSeg.element, tagHolder),
-      el('div', { class: 'stage' },
-        playBtn.element,
-        loadLine,
-        hint,
-        score,
-        noneBtn,
-        feedback.element,
-        after,
-      ),
+      options.element,
+      stage,
       helpBox({ summary: 'How it works' },
-        el('p', {}, 'You hear a chord. One note is pushed slightly up (sharp) or down (flat); the others are perfectly in tune with each other. The buttons are laid out like a little score: the highest note is on top.'),
-        VARIANT_SUPPORTED ? el('p', {}, 'With "Include all in tune" on, sometimes nothing is off — then the right answer is "All in tune". On and off each keep their own level, rank and progress.') : null,
-        el('p', {}, 'Tap a note head (the round note in the middle) to hear just that note — it never counts as an answer. Notes light up while they sound.'),
-        el('p', {}, 'Tip: listen for the note that makes the chord "wobble" or sound restless. "One by one, then together" plays the notes separately first, which makes it easier to follow each one.'),
+        el('p', {}, 'You hear a chord. One note is a little too high (♯ sharp) or too low (♭ flat); the others are perfectly in tune. The highest note is on top, like a score.'),
+        VARIANT_SUPPORTED ? el('p', {}, 'With "Sometimes all in tune" on, sometimes nothing is off. Then the answer is "All in tune". With this switch on, you have separate progress and a separate rank.') : null,
+        el('p', {}, 'Tap a note head to hear that note alone. It never counts as an answer. Notes light up while they sound.'),
+        el('p', {}, 'Tip: listen for the note that makes the chord wobble. "One by one, then together" plays the notes separately first.'),
         CHORD_OPTIONS.some((o) => o.value === 'dom7')
-          ? el('p', {}, `Seventh chords have a fourth note on top, the seventh. In a dominant 7th ("Dom 7th") a choir — and especially a barbershop quartet — sings the seventh much lower than a piano plays it: about ${SEVENTH_GAP} cents lower. That low "barbershop seventh" makes the chord ring without any wobble. In pure tuning you hear that low seventh here.`)
+          ? el('p', {}, `Seventh chords add a fourth note on top: the seventh. In a dominant 7th, choirs (and barbershop quartets) sing it about ${SEVENTH_GAP} cents lower than the piano. That low seventh makes the chord ring.`)
           : null,
-        el('p', {}, 'After answering you see which notes sounded. Flip between "as played" and "in tune" — for the whole chord and for the odd note alone. That before/after comparison is where the real learning happens.'),
-        el('p', { class: 'muted small' }, `Keys: Space = play / next. Flat / sharp per note, from the bottom note up: Z / X, A / S, Q / W, and 1 / 2 for a fourth note${VARIANT_SUPPORTED ? '; N = all in tune' : ''}. After answering: 1 / 2 = chord as played / in tune, 3 / 4 = odd note as played / in tune.`),
+        el('p', {}, 'After answering, switch between "As played", "Pure" and "Piano" — for the whole chord or just the off note. Pure is how a choir tunes; piano has equal steps. Your tuning setting is the one marked "in tune". 100 cents = one semitone.'),
+        el('p', { class: 'muted small' }, `Keys: Space or Enter = play. Flat / sharp per note, from the bottom note up: Z / X, A / S, Q / W, and 7 / 8 for a seventh${VARIANT_SUPPORTED ? '; N = all in tune' : ''}; R = play again. After answering: Enter = next, 1 / 2 / 3 = as played / pure / piano, Space = play / stop, Esc = stop.`),
       ),
       panelHolder,
     );
 
+    placer = lxPrimaryPlacer(actionBar, { top: status, bottom: legend.element, onChange: () => sync() });
+    const unwatchKeys = lxWatchSingleKeys(screen, () => legend.set(legendText()));
+    const unmirrorLevel = lxInlineLevel(level, headLevel);
     newQuestion();
     container.append(screen);
+    // Keyboard: after a mouse change of an option go back to Play / Next; after comparing
+    // (or a note head once answered), to Next.
+    const removeRefocus = refocusAfterPointerChange(screen, primary);
+    refocusAfterClick(compareArea, () => next.element);
+    refocusAfterClick(score, () => (state === 'feedback' ? next.element : null));
 
     return () => {
+      clearTimeout(gateTimer);
+      clearTimeout(flashTimer);
+      if (cancelLevelAnim) cancelLevelAnim();
+      if (compare) { const c = compare; compare = null; c.destroy(); }
+      if (resolveBusy) resolveBusy();
+      removeRefocus();
       unsubscribe();
       removeShortcuts();
+      removeEscape();
+      pause.destroy();
+      placer.destroy();
+      unwatchKeys();
+      unmirrorLevel();
       player.destroy();
     };
   },

@@ -8,9 +8,9 @@ import { TIMBRES, playChord } from '../audio/engine.js';
 import { getSettings, updateSettings, onSettingsChange } from '../storage.js';
 import { el, signedCents } from '../ui/dom.js';
 import { icon } from '../ui/icons.js';
-import { segmented, helpBox, tagLink } from '../ui/components.js';
+import { segmented, helpBox, tagLink, onEscape } from '../ui/components.js';
 import { createPlayer } from '../ui/player.js';
-import { voiceArg, partsLabel, chosenVoiceParts } from '../ui/voices.js';
+import { voiceArg, partsLabel, chosenVoiceParts, voiceChosen } from '../ui/voices.js';
 
 const CHORD_SECONDS = 3;
 const BEAT_SECONDS = 5;
@@ -35,19 +35,30 @@ export default {
 
     // ---------- Player bar ----------
     const statusEl = el('p', { class: 'player-status', role: 'status', 'aria-live': 'polite' }, 'Not playing');
+    const stopBtn = el('button', { type: 'button', class: 'btn btn-small', disabled: true, onclick: () => player.stop() },
+      icon('square', { size: 16 }), 'Stop');
     const player = createPlayer({
       pauseMs: 600,
       onChange: (s) => {
         statusEl.textContent = s.error || (s.playing || s.loading ? s.label : 'Not playing');
         statusEl.className = `player-status${s.playing ? ' is-playing' : ''}${s.error ? ' is-error' : ''}`;
+        // Stop only does something while a sound plays (or loads).
+        const active = !!(s.playing || s.loading);
+        if (!active && document.activeElement === stopBtn) stopBtn.blur();
+        stopBtn.disabled = !active;
       },
+    });
+    const offEsc = onEscape(() => {
+      if (!player.playing) return false;
+      player.stop();
+      return true;
     });
     const rootLine = el('div', { class: 'root-line' });
     const partTag = el('span', { class: 'tag-holder' });
 
     function renderRoot() {
       rootLine.textContent = `Starting note ≈ ${noteName(freqToMidi(rootFreq))}`;
-      partTag.replaceChildren(tagLink({ href: '#/settings', label: partsLabel(chosenVoiceParts(settings)), title: 'Voice parts — change in Settings' }));
+      partTag.replaceChildren(tagLink({ href: '#/settings', label: voiceChosen(settings) ? partsLabel(chosenVoiceParts(settings)) : 'Voice part not chosen yet', title: 'Voice parts — change in Settings' }));
     }
     function newPitch() {
       player.stop();
@@ -55,15 +66,30 @@ export default {
       renderRoot();
     }
 
-    const playerBar = el('div', { class: 'player-bar' },
+    const playerBar = el('div', { class: 'player-bar', 'data-inset-top': '' },
       el('div', { class: 'player-info' }, el('div', { class: 'root-row' }, rootLine, partTag), statusEl),
       el('div', { class: 'player-actions' },
-        el('button', { type: 'button', class: 'btn btn-small', onclick: newPitch }, icon('shuffle', { size: 18 }), 'New pitch'),
-        el('button', { type: 'button', class: 'btn btn-small', onclick: () => player.stop() }, icon('square', { size: 16 }), 'Stop'),
+        el('button', { type: 'button', class: 'btn btn-small', onclick: newPitch }, icon('shuffle', { size: 18 }), 'New starting note'),
+        stopBtn,
       ),
     );
 
     // ---------- Sound ----------
+    // These switches change the setting for ALL exercises (same as Settings): say so, and
+    // confirm briefly after a change.
+    const GLOBAL_TUNING = 'This also changes the tuning for all exercises — same as Settings.';
+    const GLOBAL_SOUND = 'This also changes the sound for all exercises — same as Settings.';
+    const tuningNote = el('p', { class: 'global-note', role: 'status' }, GLOBAL_TUNING);
+    const soundNote = el('p', { class: 'global-note', role: 'status' }, GLOBAL_SOUND);
+    function confirmChange(node, text) {
+      node.textContent = `✓ ${text}`;
+      node.classList.add('is-confirm');
+      clearTimeout(node._t);
+      node._t = setTimeout(() => {
+        node.textContent = node === tuningNote ? GLOBAL_TUNING : GLOBAL_SOUND;
+        node.classList.remove('is-confirm');
+      }, 3500);
+    }
     const timbreDesc = el('p', { class: 'muted small seg-desc' });
     const renderTimbreDesc = () => {
       const t = TIMBRES[settings.timbre];
@@ -75,7 +101,11 @@ export default {
       compact: true,
       options: Object.values(TIMBRES).map((t) => ({ value: t.key, label: t.label })),
       value: settings.timbre,
-      onChange: (v) => updateSettings({ timbre: v }),
+      onChange: (v) => {
+        updateSettings({ timbre: v });
+        const t = TIMBRES[v];
+        confirmChange(soundNote, `Exercises now use: ${t ? t.label : v}`);
+      },
     });
 
     // ---------- Pure vs piano ----------
@@ -110,10 +140,10 @@ export default {
       el('p', { class: 'muted' }, 'The same major chord, tuned two ways. Listen to the middle note.'),
       el('div', { class: 'btn-row' },
         playButton('Pure', () => player.play([chordStep(TUNINGS.JUST, 'Pure chord (choir tuning)')]), 'btn-pure'),
-        playButton('Piano', () => player.play([chordStep(TUNINGS.EQUAL, 'Piano chord (equal temperament)')]), 'btn-piano'),
-        playButton('A/B: pure, then piano', () => player.play([
-          chordStep(TUNINGS.JUST, 'A: pure chord'),
-          chordStep(TUNINGS.EQUAL, 'B: piano chord'),
+        playButton('Piano', () => player.play([chordStep(TUNINGS.EQUAL, 'Piano chord (equal steps)')]), 'btn-piano'),
+        playButton('Pure, then piano', () => player.play([
+          chordStep(TUNINGS.JUST, '1 of 2: pure chord'),
+          chordStep(TUNINGS.EQUAL, '2 of 2: piano chord'),
         ]), 'btn-primary'),
       ),
       helpBox({ summary: 'Show the numbers' },
@@ -142,21 +172,25 @@ export default {
       compact: true,
       options: [{ value: TUNINGS.JUST, label: 'Pure (choir)' }, { value: TUNINGS.EQUAL, label: 'Piano' }],
       value: settings.tuning,
-      onChange: (v) => updateSettings({ tuning: v }),
+      onChange: (v) => {
+        updateSettings({ tuning: v });
+        confirmChange(tuningNote, `Exercises now use: ${v === TUNINGS.EQUAL ? 'Piano' : 'Pure (choir)'} tuning`);
+      },
     });
     const detuneSeg = segmented({
       name: 'sc-detune',
       legend: 'Push the third up by',
       compact: true,
-      options: DETUNE_OPTIONS.map((c) => ({ value: c, label: c === 0 ? '0' : `+${c}` })),
+      options: DETUNE_OPTIONS.map((c) => ({ value: c, label: c === 0 ? '0 (in tune)' : `+${c} cents` })),
       value: detune,
       onChange: (v) => { detune = v; },
     });
 
     const beatCard = el('div', { class: 'card' },
-      el('h2', {}, 'Hear beating'),
-      el('p', { class: 'muted' }, 'Two notes slightly out of tune make the sound wobble. The further out, the faster the wobble.'),
+      el('h2', {}, 'Hear the wobble'),
+      el('p', { class: 'muted' }, 'Two notes slightly out of tune make the sound wobble (also called beating). The further out, the faster the wobble.'),
       tuningSeg.element,
+      tuningNote,
       targetLine,
       detuneSeg.element,
       el('div', { class: 'btn-row' },
@@ -169,9 +203,9 @@ export default {
       helpBox({ summary: 'What to listen for' },
         el('ul', { class: 'listen-guide' },
           el('li', {}, el('strong', {}, '0: '), 'smooth and still'),
-          el('li', {}, el('strong', {}, '+5 to +10: '), 'a slow, gentle wobble'),
-          el('li', {}, el('strong', {}, '+20: '), 'a clear, faster flutter'),
-          el('li', {}, el('strong', {}, '+40: '), 'rough and sour'),
+          el('li', {}, el('strong', {}, '+5 to +10 cents: '), 'a slow, gentle wobble'),
+          el('li', {}, el('strong', {}, '+20 cents: '), 'a clear, faster wobble'),
+          el('li', {}, el('strong', {}, '+40 cents: '), 'rough and sour'),
         ),
         el('p', { class: 'small muted' }, `Choirs tune by ear exactly like this: when the wobble disappears, the chord is in tune. Try "Piano" at 0 — even the piano third wobbles a little, because it is about ${thirdGap} cents higher than pure.`),
       ),
@@ -186,13 +220,14 @@ export default {
         ),
       ),
       el('div', { class: 'options-row' }, timbreSeg.element),
+      soundNote,
       timbreDesc,
       playerBar,
       chordCard,
       beatCard,
       helpBox({ summary: 'What are cents?' },
         el('p', {}, 'A cent is a tiny step of pitch: 100 cents make one piano semitone. A few cents is a very small shift, but a choir can clearly hear it.'),
-        el('p', {}, 'Pure tuning (just intonation) is how a good a cappella choir tunes chords: the notes fit so cleanly that the chord sounds calm. Piano tuning (equal temperament) makes every semitone the same size, so chords sound slightly restless.'),
+        el('p', {}, 'Pure tuning (also called just intonation) is how a good a cappella choir tunes chords: the notes fit so cleanly that the chord sounds calm. Piano tuning (also called equal temperament) makes every semitone the same size, so chords wobble slightly.'),
       ),
     );
 
@@ -216,6 +251,7 @@ export default {
     });
 
     return () => {
+      offEsc();
       unsubscribe();
       player.destroy();
     };

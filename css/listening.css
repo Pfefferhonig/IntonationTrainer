@@ -1,0 +1,208 @@
+/* Listening screens (Higher / lower, Odd one out). Owned by workstream B — see docs/BUILD-PLAN.md.
+   Scoped to .lx-screen; shared components (options summary, compare switch, action bar, feedback, tip,
+   paused and summary cards) are styled in style.css. Results never use red. */
+
+/* ---------- Status lines ---------- */
+.lx-status { min-height: 1.4em; margin: 0; text-align: center; }
+.lx-status:empty { visibility: hidden; }
+.lx-flash { margin: -6px 0 0; font-size: 0.92rem; font-weight: 600; color: var(--accent); text-align: center; }
+.lx-flash:empty { display: none; }
+.lx-option-help { margin: 6px 0 0; color: var(--text-muted); }
+.lx-option-help:empty { display: none; }
+.lx-option { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.lx-options-row { margin-bottom: 12px; }
+.lx-slot { width: 100%; max-width: 560px; }
+.lx-slot:empty { display: none; }
+.lx-stage .tip-card { width: 100%; max-width: 560px; }
+
+/* ---------- Higher / lower: the "1" "2" markers ---------- */
+.lx-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  width: 100%;
+  max-width: 420px;
+}
+.lx-marker {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.lx-marker-num {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 2px solid var(--border-strong);
+  border-radius: 50%;
+  font-weight: 700;
+  font-size: 1.15rem;
+  color: var(--text-muted);
+  background: var(--surface);
+  transition: background-color var(--dur-fast, 100ms) ease, color var(--dur-fast, 100ms) ease,
+    border-color var(--dur-fast, 100ms) ease, transform var(--dur-fast, 100ms) ease;
+}
+.lx-marker.is-sounding .lx-marker-num {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+  transform: scale(1.12);
+  box-shadow: 0 0 0 5px var(--accent-soft);
+}
+.lx-marker-cap {
+  min-height: 2.6em; /* reserved: names appear after answering without a jump */
+  font-size: 0.9rem;
+  line-height: 1.3;
+  text-align: center;
+  color: var(--text-muted);
+}
+.lx-reveal .lx-marker-cap { color: var(--text); font-weight: 600; }
+
+/* ---------- Answers: locked while the question is still sounding ---------- */
+.lx-screen .lx-answers .btn,
+.lx-screen .lx-score .btn-accidental,
+.lx-screen .btn-none { transition: opacity 150ms var(--ease-standard, ease), background-color var(--dur-fast, 100ms) ease; }
+.lx-screen .is-locked .btn,
+.lx-screen .btn.is-locked { opacity: 0.4; cursor: default; }
+
+/* Result marks: ✓ (green) on the right answer, a neutral ✗ on a miss. */
+.lx-mark { display: inline-flex; align-items: center; flex: none; color: var(--text-muted); }
+.lx-mark.is-right { color: var(--ok-text); }
+.lx-screen .btn-accidental .lx-mark { margin-left: 2px; }
+.lx-screen .btn.is-chosen { border-width: 2px; }
+
+/* ---------- Odd one out: score ---------- */
+.lx-score-heading {
+  min-height: 1.4em;
+  margin: 0;
+  font-weight: 650;
+  color: var(--text);
+  text-align: center;
+}
+.lx-score-caption { font-weight: 400; font-size: 0.88rem; color: var(--text-muted); white-space: nowrap; }
+.lx-score-caption .icon { vertical-align: -2px; }
+.lx-chord-name { white-space: nowrap; }
+/* Phone-only pieces (see the phone section). */
+.lx-head-level, .lx-task-short, .lx-name-label { display: none; }
+.lx-head-level { color: var(--text-muted); font-weight: 600; }
+/* Note heads always show they can be played. */
+.lx-score .score-head-icon { opacity: 1; color: var(--text-muted); }
+.lx-score .score-head-btn { border: 1px solid var(--border-strong); }
+.lx-score .score-head-btn:hover { background: var(--surface-2); }
+/* The off note: amber, not red. */
+.lx-score .score-row.is-odd .score-head { background: var(--close, var(--piano)); }
+.lx-score .lx-dev { color: var(--close-text, var(--piano)); font-weight: 700; }
+.lx-score .lx-dev.is-in-tune { color: var(--ok-text); }
+.lx-score .lx-dev.is-other { color: var(--text); }
+.lx-score .score-row.is-odd .lx-note-name { color: var(--text); font-weight: 700; }
+.lx-score .score-name { color: var(--text-muted); overflow: visible; }
+.lx-score .lx-sep { color: var(--text-muted); }
+/* While the comparison sounds: the sounding notes light up (green when in tune). */
+.lx-score .score-row.is-compare .score-head {
+  background: var(--accent);
+  transform: rotate(-20deg) scale(1.25);
+  box-shadow: 0 0 0 5px var(--accent-soft);
+}
+.lx-score.is-compare-in-tune .score-row.is-compare .score-head { background: var(--ok); }
+
+/* ---------- Compare (directly under the grid + feedback) ---------- */
+.lx-compare {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 560px;
+}
+.lx-compare[hidden] { display: none; }
+.lx-compare-holder { width: 100%; display: flex; justify-content: center; }
+
+/* Odd one out compare: "Pure (in tune)" — the chosen tuning's tag. */
+.lx-tune-tag { font-size: 0.85em; font-weight: 500; }
+
+/* ---------- Level: ▼ / ▲ for 2 s after a change ---------- */
+.lx-level-arrow { margin-left: 6px; font-size: 0.85em; color: var(--accent); }
+
+/* ---------- Staged reveal after answering (the feedback panel animates itself) ---------- */
+.lx-reveal .lx-marker-cap,
+.lx-reveal .score-name,
+.lx-reveal .lx-score-heading { animation: lx-fade 150ms var(--ease-enter, ease-out) 160ms both; }
+.lx-reveal .lx-compare { animation: lx-fade var(--dur-normal, 200ms) var(--ease-enter, ease-out) 160ms both; }
+@keyframes lx-fade { from { opacity: 0; } to { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .lx-reveal .lx-marker-cap,
+  .lx-reveal .score-name,
+  .lx-reveal .lx-score-heading,
+  .lx-reveal .lx-compare { animation: none; }
+  .lx-screen .lx-answers .btn,
+  .lx-screen .lx-score .btn-accidental,
+  .lx-screen .btn-none,
+  .lx-marker-num { transition: none; }
+  .lx-marker.is-sounding .lx-marker-num,
+  .lx-score .score-row.is-compare .score-head { transform: none; }
+}
+
+/* Single-key badges (letters, digits, =) hidden while Settings > Single-key shortcuts is off. */
+.lx-screen.is-no-single-keys .lx-key-single { display: none; }
+
+/* Single "Play again" when nothing differs (instead of a one-option compare switch). */
+.lx-replay { min-width: 180px; justify-content: center; }
+.lx-replay-icon { display: inline-flex; }
+
+/* ---------- Phones: one round on one screen (375 × 700) ---------- */
+@media (max-width: 600px) {
+  /* Heading: title · difference on one line, then a one-line task. The level card is hidden. */
+  .lx-screen .screen-head { margin-bottom: 8px; gap: 0; }
+  .lx-screen .screen-head .level { display: none; }
+  .lx-screen .screen-head h1 { margin-bottom: 2px; }
+  .lx-head-level { display: inline; font-size: 0.8em; }
+  /* The one-line task is the state line in the card ("Press Play…", "Listen to the end…",
+     "Which note is off…"), so the heading's task sentence is left out; an empty state line takes no room. */
+  .lx-screen .screen-head .task { display: none; }
+  .lx-status:empty { display: none; }
+
+  .lx-screen .lx-stage { padding: 12px; gap: 10px; margin-bottom: 12px; }
+  .lx-ooo .lx-stage { gap: 8px; }
+  .lx-status { min-height: 1.3em; font-size: 0.88rem; }
+
+  /* Higher / lower: markers side by side in one low row; answers in one row. */
+  .lx-pair { gap: 8px; }
+  .lx-marker { flex-direction: row; justify-content: center; gap: 8px; }
+  .lx-marker-num { width: 34px; height: 34px; font-size: 1rem; flex: none; }
+  .lx-marker-cap { display: flex; align-items: center; min-height: 2.6em; font-size: 0.85rem; text-align: left; }
+  .lx-answers.answers-stack { flex-direction: row; gap: 8px; max-width: none; }
+  .lx-answers .btn-answer { min-height: 52px; padding-inline: 6px; gap: 6px; justify-content: center; font-size: 1.05rem; }
+  .lx-answers .btn-answer-label { flex: none; }
+
+  /* Odd one out: compact rows (buttons stay ≥ 44 px): note head, then "Third E4 · too high" in one line. */
+  .lx-score .score-row { grid-template-columns: minmax(0, 1fr) 132px minmax(0, 1fr); gap: 6px; padding: 2px 0; }
+  .lx-score.score:not(.tscore) .score-note { min-height: 58px; flex-direction: column; justify-content: flex-start; }
+  .lx-score .score-note::before { top: 22px; }
+  .lx-score .score-label { display: none; }
+  .lx-score.score .score-name {
+    position: static;
+    height: 14px;
+    max-width: 100%;
+    font-size: 0.76rem;
+    line-height: 14px;
+  }
+  .lx-name-label { display: inline; font-weight: 650; color: var(--text); }
+  .lx-score .score-head-btn { width: 44px; height: 44px; }
+  .lx-score .btn-accidental { min-height: 48px; padding-inline: 4px; gap: 4px; }
+  .lx-screen .btn-none { min-height: 48px; }
+  .lx-dev-amount { display: none; } /* the amount is in the feedback message */
+  .lx-score-heading { font-size: 0.95rem; }
+  .lx-score-caption { font-size: 0.82rem; }
+  .lx-caption-long { display: none; }
+
+  /* After answering: the explanation under the compare switch only the first 2 times per session. */
+  .lx-compare .compare-note.is-repeat { display: none; }
+  .lx-compare { gap: 8px; }
+
+  /* Three compare options in one row: no mid-phrase breaks; the tuning tag goes on a second line. */
+  .lx-ooo .compare-options label { padding-inline: 6px; white-space: nowrap; line-height: 1.2; }
+  .lx-ooo .lx-tune-tag { display: block; font-size: 0.75rem; }
+}

@@ -8,7 +8,8 @@ import { el, setChildren } from '../ui/dom.js';
 import { icon } from '../ui/icons.js';
 import { voicePicker, soundPicker } from '../ui/sound-picker.js';
 import { createPlayer } from '../ui/player.js';
-import { voiceArg } from '../ui/voices.js';
+import { voiceArg, voiceChosen } from '../ui/voices.js';
+import { TABS, GROUPS } from '../ui/nav.js';
 
 const STEPS = [
   { key: 'voice', title: 'Your voice' },
@@ -30,10 +31,12 @@ export default {
     // Announced to screen readers (the stepper shows the same visually).
     const stepTitle = el('h2', { class: 'visually-hidden', tabindex: '-1' });
     const nav = el('div', { class: 'setup-nav' });
+    const nextHint = el('p', { class: 'setup-next-hint', role: 'status' }, 'Pick at least one part to continue.');
+    let syncVoiceNext = () => {};
 
-    function finish() {
+    function finish(route = 'higher-or-lower') {
       setPref('setupDone', true);
-      window.location.hash = '#/higher-or-lower';
+      window.location.hash = `#/${route}`;
     }
 
     function go(n) {
@@ -61,10 +64,14 @@ export default {
       if (key === 'voice') {
         setChildren(body,
           el('p', { class: 'task' }, 'Which part do you sing? The exercises will use notes that suit your voice.'),
-          voicePicker({ legend: 'Voice parts', help: 'Pick the part(s) you sing — several are fine. Not sure? Choose "Any voice". You can change this any time in Settings.' }),
+          voicePicker({
+            legend: 'Voice parts',
+            help: 'Tick the part(s) you sing — several are fine. You can change this any time in Settings.',
+            onChange: () => syncVoiceNext(),
+          }),
         );
       } else if (key === 'sound') {
-        const picker = soundPicker({ legend: 'Sound', help: 'Press ▶ to try each sound, then pick the one you like. Fuller sounds make tuning easier to hear.' });
+        const picker = soundPicker({ legend: 'Sound', help: 'Press ▶ to hear a sound — that also chooses it. Fuller sounds make tuning easier to hear.' });
         stepCleanup = () => picker.destroy();
         setChildren(body,
           el('p', { class: 'task' }, 'Choose the instrument sound for the exercises. Headphones or good speakers help a lot.'),
@@ -75,16 +82,24 @@ export default {
       }
 
       const isLast = step === STEPS.length - 1;
+      const nextBtn = el('button', { type: 'button', class: 'btn btn-primary', onclick: () => go(step + 1) },
+        'Next', icon('chevron-right', { size: 20 }));
+      // Step 1: Next stays disabled until a part is picked ("Skip setup" keeps the fallback range).
+      syncVoiceNext = () => {
+        const needPart = STEPS[step].key === 'voice' && !voiceChosen();
+        nextBtn.disabled = needPart;
+        nextHint.hidden = !needPart;
+      };
       setChildren(nav,
         step > 0
           ? el('button', { type: 'button', class: 'btn', onclick: () => go(step - 1) }, 'Back')
-          : el('button', { type: 'button', class: 'btn btn-link', onclick: finish }, 'Skip setup'),
+          : el('button', { type: 'button', class: 'btn btn-link', onclick: () => finish() }, 'Skip setup'),
         isLast
-          ? el('button', { type: 'button', class: 'btn btn-primary', onclick: finish },
-            'Start the first exercise', icon('chevron-right', { size: 20 }))
-          : el('button', { type: 'button', class: 'btn btn-primary', onclick: () => go(step + 1) },
-            'Next', icon('chevron-right', { size: 20 })),
+          ? el('button', { type: 'button', class: 'btn btn-primary', onclick: () => finish() },
+            'Start with Higher / lower', icon('chevron-right', { size: 20 }))
+          : nextBtn,
       );
+      syncVoiceNext();
       if (!firstPaint) stepTitle.focus({ preventScroll: true });
       firstPaint = false;
       window.scrollTo(0, 0);
@@ -97,13 +112,12 @@ export default {
       const span = Math.max(...chord.intervals.map((k) => INTERVALS[k].semitones));
       const root = randomRootFreq(voiceArg(s), span);
       const thirdGap = Math.round(INTERVALS.M3.equalCents - INTERVALS.M3.justCents);
-      const status = el('p', { class: 'stage-status', role: 'status' });
-      status.hidden = true;
+      // Always in the page with a reserved height, so nothing jumps while it plays.
+      const status = el('p', { class: 'stage-status setup-listen-status', role: 'status' });
       const player = createPlayer({
         pauseMs: 600,
         onChange: (st) => {
           status.textContent = st.error || (st.playing || st.loading ? st.label : '');
-          status.hidden = !status.textContent;
           status.classList.toggle('is-error', !!st.error);
         },
       });
@@ -114,25 +128,41 @@ export default {
       });
       setChildren(body,
         el('p', { class: 'task' },
-          `In a choir, a pure major third is about ${thirdGap} cents lower than on a piano (100 cents = one semitone). Listen to the middle note of these two chords.`),
+          `In a choir, a pure major third is about ${thirdGap} cents lower than on a piano (100 cents = one semitone). Listen to the middle note of these chords.`),
         el('div', { class: 'stage' },
           el('div', { class: 'btn-row setup-listen' },
-            el('button', { type: 'button', class: 'btn btn-pure', onclick: () => player.play([chordStep(TUNINGS.JUST, 'Pure chord (choir tuning)')]) },
-              icon('play', { size: 18 }), 'Pure (choir)'),
-            el('button', { type: 'button', class: 'btn btn-piano', onclick: () => player.play([chordStep(TUNINGS.EQUAL, 'Piano chord')]) },
-              icon('play', { size: 18 }), 'Piano'),
             el('button', {
               type: 'button',
-              class: 'btn btn-primary',
-              onclick: () => player.play([chordStep(TUNINGS.JUST, 'A: pure chord'), chordStep(TUNINGS.EQUAL, 'B: piano chord')]),
-            }, icon('play', { size: 18 }), 'Both, one after the other'),
+              class: 'btn',
+              onclick: () => player.play([chordStep(TUNINGS.JUST, 'Pure chord…'), chordStep(TUNINGS.EQUAL, 'Piano chord…')]),
+            }, icon('play', { size: 18 }), 'Pure, then piano'),
+            el('button', { type: 'button', class: 'btn btn-pure', onclick: () => player.play([chordStep(TUNINGS.JUST, 'Pure chord…')]) },
+              icon('play', { size: 18 }), 'Pure'),
+            el('button', { type: 'button', class: 'btn btn-piano', onclick: () => player.play([chordStep(TUNINGS.EQUAL, 'Piano chord…')]) },
+              icon('play', { size: 18 }), 'Piano'),
           ),
           status,
-          el('p', { class: 'muted small center' }, 'The pure chord sounds calmer and more "locked"; the piano chord shimmers a little. That small difference is what these exercises train.'),
+          el('p', { class: 'muted small center' }, 'The pure chord sounds calm. The piano chord wobbles a little. These exercises train you to hear that difference.'),
         ),
-        el('p', { class: 'muted small' }, 'You can hear this again any time under Settings → Sound check.'),
+        el('p', { class: 'muted small' }, 'You can hear this again any time in Settings → Sound check.'),
+        exerciseMap(),
       );
       return () => player.destroy();
+    }
+
+    // The five exercises, grouped as in the navigation, with their one-liners.
+    function exerciseMap() {
+      return el('section', { class: 'card exercise-map', 'aria-labelledby': 'map-title' },
+        el('h2', { class: 'card-title', id: 'map-title' }, 'Your five exercises'),
+        GROUPS.filter((g) => g.key === 'listen' || g.key === 'sing').map((g) => el('div', { class: 'map-group' },
+          el('h3', { class: 'map-group-title' }, icon(g.icon, { size: 16 }), g.label),
+          el('ul', { class: 'map-list' }, TABS.filter((t) => t.group === g.key).map((t) => el('li', {},
+            el('a', {
+              href: `#/${t.route}`,
+              onclick: (e) => { e.preventDefault(); finish(t.route); },
+            }, icon(t.icon, { size: 18 }), el('strong', {}, t.label)),
+            el('span', { class: 'muted' }, ` — ${t.blurb}`)))))),
+      );
     }
 
     const screen = el('section', { class: 'screen setup' },
@@ -146,6 +176,7 @@ export default {
       stepper,
       stepTitle,
       body,
+      nextHint,
       nav,
     );
     container.append(screen);

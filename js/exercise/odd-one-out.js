@@ -4,6 +4,7 @@
 
 import {
   CHORDS, INTERVALS, buildChord, randomRootFreq, shiftByCents, formatCents, describeFreq, chordName,
+  centsBetween, rootName, spellInterval, deviation,
 } from '../music/tuning.js';
 
 /** Share of all-in-tune questions when allowNone is on. */
@@ -65,11 +66,16 @@ export function makeQuestion({ cents, chordKey = 'major', tuning = 'just', voice
  * are right. { index: -1, direction: 'none' } means "all in tune".
  * @param {object} question from makeQuestion
  * @param {{index: number, direction: 'sharp'|'flat'|'none'}} answer
- * @returns {{correct: boolean, noteCorrect: boolean, directionCorrect: boolean, message: string}}
+ * Messages (UX-WRITING patterns): 'Right — the third was 12 cents too high.' /
+ * 'Close — right note, wrong way: the third was 12 cents too high.' /
+ * 'Not this time — the third was 12 cents too high. The root was in tune.' /
+ * 'Right — every note was in tune.' / 'Not this time — every note was in tune.'
+ * level: 'in-tune' when right, 'close' for the right note in the wrong direction, else 'keep-going'.
+ * @returns {{correct: boolean, noteCorrect: boolean, directionCorrect: boolean,
+ *   level: 'in-tune'|'close'|'keep-going', message: string}}
  */
 export function checkAnswer(question, { index, direction }) {
   const answeredNone = index === -1 || direction === 'none';
-  const size = formatCents(question.cents);
 
   if (question.oddIndex === -1) {
     const correct = answeredNone;
@@ -77,55 +83,72 @@ export function checkAnswer(question, { index, direction }) {
       correct,
       noteCorrect: correct,
       directionCorrect: correct,
-      message: correct ? 'Yes — the chord was perfectly in tune.' : 'Not quite — the chord was perfectly in tune.',
+      level: correct ? 'in-tune' : 'keep-going',
+      message: `${correct ? 'Right' : 'Not this time'} — every note was in tune.`,
     };
   }
 
   const odd = question.tones[question.oddIndex];
-  const oddName = `the ${odd.label.toLowerCase()}`;
-  const actual = question.direction === 'sharp' ? 'sharp (too high)' : 'flat (too low)';
+  const fact = `the ${odd.label.toLowerCase()} was ${formatCents(question.cents)} too ${question.direction === 'sharp' ? 'high' : 'low'}`;
 
   if (answeredNone) {
-    return {
-      correct: false,
-      noteCorrect: false,
-      directionCorrect: false,
-      message: `Not quite — ${oddName} was ${size} ${actual}.`,
-    };
+    return { correct: false, noteCorrect: false, directionCorrect: false, level: 'keep-going', message: `Not this time — ${fact}.` };
   }
 
   const noteCorrect = index === question.oddIndex;
   const directionCorrect = direction === question.direction;
   const correct = noteCorrect && directionCorrect;
-  const otherWord = question.direction === 'sharp' ? 'flat' : 'sharp';
 
   let message;
+  let level;
   if (correct) {
-    message = `Yes! ${cap(oddName)} was ${size} ${actual}.`;
+    message = `Right — ${fact}.`;
+    level = 'in-tune';
   } else if (noteCorrect) {
-    message = `Close: ${oddName} was off, but it was ${question.direction}, not ${otherWord}. It was ${size} too ${question.direction === 'sharp' ? 'high' : 'low'}.`;
+    message = `Close — right note, wrong way: ${fact}.`;
+    level = 'close';
   } else {
     const picked = question.tones[index];
     const pickedPart = picked ? ` ${cap(`the ${picked.label.toLowerCase()}`)} was in tune.` : '';
-    message = `Not quite: it was ${oddName}, which was ${size} ${actual}.${pickedPart}`;
+    message = `Not this time — ${fact}.${pickedPart}`;
+    level = 'keep-going';
   }
-  return { correct, noteCorrect, directionCorrect, message };
+  return { correct, noteCorrect, directionCorrect, level, message };
 }
 
 /**
  * What actually sounded, for after the answer.
  * title e.g. 'D major chord (root D4 −8)'; notes: each tone low to high with
  * { label, name, cents } of the tone as played, plus played / inTune (describeFreq).
+ * (Piano-grid names; kept until the UI uses the fields below.)
+ * New (design critique #1), names spelled for the chord, deviation only on the off tone:
+ *   heading / chord: 'B♭ dominant 7th' (key spelling),
+ *   tones: [{ label, name: 'D4', deviation: { cents (signed), text: '35 cents too high' } | null,
+ *             isOff, isYours: false }] low to high — in-tune tones name only; "all in tune" -> no deviations.
  * @param {object} question from makeQuestion
  */
 export function describe(question) {
   const root = question.tones.find((t) => t.intervalKey === 'P1') || question.tones[0];
   const title = `${chordName(root.correctFreq, question.chordKey)} chord (root ${describeFreq(root.correctFreq).text})`;
+  const key = rootName(root.correctFreq);
+  const chord = `${key.pitchClass} ${CHORDS[question.chordKey].quality}`;
   return {
     title,
     notes: question.tones.map((t) => {
       const played = describeFreq(t.freq);
       return { label: t.label, name: played.name, cents: played.cents, played, inTune: describeFreq(t.correctFreq) };
+    }),
+    heading: chord,
+    chord,
+    tones: question.tones.map((t, i) => {
+      const isOff = i === question.oddIndex;
+      return {
+        label: t.label,
+        name: spellInterval(key, t.intervalKey).name,
+        deviation: isOff ? deviation(centsBetween(t.correctFreq, t.freq), 'too high', 'too low') : null,
+        isOff,
+        isYours: false,
+      };
     }),
   };
 }

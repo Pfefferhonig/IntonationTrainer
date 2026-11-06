@@ -5,6 +5,20 @@ import { getSettings } from '../storage.js';
 
 const { VOICE_PARTS, noteName } = tuning;
 
+/** The real (singable) voice parts shown in the pickers: no "Any voice". */
+export const REAL_PARTS = Object.keys(VOICE_PARTS).filter((k) => k !== 'any');
+
+/**
+ * Has the singer picked at least one real part (not just the internal 'any' fallback)?
+ * Uses tuning.isVoiceChosen when available.
+ */
+export function voiceChosen(settings = getSettings()) {
+  if (typeof tuning.isVoiceChosen === 'function') {
+    try { return !!tuning.isVoiceChosen(settings.voiceParts); } catch { /* fall back */ }
+  }
+  return (settings.voiceParts || []).some((k) => REAL_PARTS.includes(k));
+}
+
 /** The chosen voice-part keys (known ones only; never empty). */
 export function chosenVoiceParts(settings = getSettings()) {
   const parts = (settings.voiceParts || []).filter((k) => Object.prototype.hasOwnProperty.call(VOICE_PARTS, k));

@@ -1,0 +1,343 @@
+/* Producing screens (Lock it in, Echo, Join the chord). Owned by workstream C — see docs/BUILD-PLAN.md.
+   Uses the shared tokens from style.css (colours, --close*, --target, --dur-*, --ease-*). Classes
+   prefixed .pc- belong to these screens (and to the local fallbacks in js/ui/sing-common.js). */
+
+.producing .stage { gap: 14px; }
+.producing .task-desc { margin-bottom: 10px; }
+.producing .options-summary, .producing .pc-opts { margin-bottom: 12px; }
+
+/* "Pure tuning ›" — a plain link (it leaves the exercise), not a toggle-looking chip */
+.pc-link { color: var(--accent); font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+.pc-link:hover { color: var(--accent-hover); }
+.pc-tuning-line { margin: 4px 0 0; color: var(--text-muted); }
+.pc-switches { margin: 8px 0 0; }
+
+/* ---------- Lock it in: relative-drag slider ---------- */
+
+.pc-slider-wrap { gap: 10px; }
+.pc-slider {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: var(--target, 44px);
+  display: flex;
+  align-items: center;
+  cursor: grab;
+  touch-action: pan-y; /* horizontal drags belong to the slider, vertical ones still scroll the page */
+  -webkit-user-select: none;
+  user-select: none;
+  border-radius: 999px;
+  outline: none;
+}
+.pc-slider.is-dragging { cursor: grabbing; }
+.pc-slider:focus-visible { outline: 3px solid var(--focus); outline-offset: 4px; }
+.pc-slider-track {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 12px;
+  margin: 0 17px; /* the thumb's half width: it never sticks out at the ends */
+  border-radius: 999px;
+  background: var(--border);
+  border: 1px solid var(--border-strong);
+}
+.pc-slider-thumb {
+  position: absolute;
+  top: 50%;
+  width: 34px;
+  height: 34px;
+  margin: -17px 0 0 -17px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 3px solid var(--surface);
+  box-shadow: 0 0 0 1px var(--accent), var(--shadow);
+  transition: box-shadow var(--dur-fast, 100ms) var(--ease-standard, ease);
+}
+.pc-slider.is-dragging .pc-slider-thumb { box-shadow: 0 0 0 1px var(--accent), 0 0 0 7px var(--accent-soft); }
+.pc-slider.is-disabled { cursor: default; opacity: 0.45; }
+.pc-slider.is-disabled .pc-slider-thumb { background: var(--text-muted); box-shadow: 0 0 0 1px var(--text-muted); }
+.producing .pc-end { display: inline; transition: color var(--dur-fast, 100ms) linear; }
+.producing .pc-end.is-flash { color: var(--accent); font-weight: 700; }
+
+/* After the answer the slider makes room for "F♯4 · 8 cents above pure" */
+.pc-your-result { display: none; font-size: 1rem; color: var(--text); background: var(--surface); padding: 0 6px; position: relative; }
+.pc-slider-wrap.is-answered .pc-slider,
+.pc-slider-wrap.is-answered .pc-end { display: none; }
+.pc-slider-wrap.is-answered .pc-your-result:not(:empty) { display: inline-block; }
+
+/* Fine-tune buttons: 44 × 44 at least, press and hold repeats */
+.producing .btn-nudge {
+  min-width: 52px;
+  min-height: var(--target, 44px);
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.pc-sound-toggle[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.pc-sound-toggle[aria-pressed="false"] { color: var(--text-muted); }
+
+/* ---------- Singing: hold / tap button with its messages underneath ---------- */
+
+.pc-hold-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+.pc-hold-box .btn-hold { min-width: 240px; }
+.pc-hold-icon, .pc-hold-kbd { display: inline-flex; }
+.btn-hold[aria-disabled="true"] { opacity: 0.6; cursor: default; }
+.btn-hold.is-busy .pc-hold-icon .icon { animation: spin 0.9s linear infinite; }
+.btn-hold.is-counting { font-variant-numeric: tabular-nums; font-size: 1.5rem; font-weight: 800; }
+.btn-hold.is-held { transition: background-color var(--dur-fast, 100ms) var(--ease-enter, ease-out); }
+.btn-hold.is-shake { animation: pc-shake 300ms var(--ease-standard, ease); }
+@keyframes pc-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-4px); }
+  40% { transform: translateX(4px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+.pc-hold-msg { margin: 0; max-width: 46ch; text-align: center; font-size: 0.92rem; color: var(--text-muted); }
+.pc-hold-msg:empty { display: none; }
+.pc-hold-msg.is-warn {
+  padding: 8px 14px;
+  border: 1px solid var(--close);
+  border-radius: var(--radius-sm);
+  background: var(--close-bg);
+  color: var(--close-text);
+  font-weight: 600;
+}
+.producing .hold { max-width: 360px; }
+.producing .hold-mark { opacity: 1; background: var(--text-muted); }
+
+.pc-mic-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 52ch;
+  padding: 10px 14px;
+  border: 1px solid var(--close);
+  border-radius: var(--radius-sm);
+  background: var(--close-bg);
+  color: var(--close-text);
+  text-align: center;
+}
+.pc-mic-error p { margin: 0; }
+.pc-mic-error-text p:first-child { font-weight: 600; }
+.mic-error .pc-mic-error-text p + p { margin-top: 2px; }
+
+.sing-options { gap: 8px 20px; }
+.pc-setup-nav { margin-top: 12px; }
+.mic-setup-title:focus { outline: none; }
+.mic-setup-title:focus-visible { outline: 3px solid var(--focus); outline-offset: 4px; border-radius: 4px; }
+
+/* Recording dot: pulses; with reduced motion a solid dot and bold text */
+@media (prefers-reduced-motion: reduce) {
+  .producing .rec-dot { font-weight: 800; }
+  .btn-hold.is-shake { animation: none; }
+  .btn-hold.is-busy .pc-hold-icon .icon { animation-duration: 2.4s; }
+}
+
+/* ---------- Pitch trace: zoomed ±50 cents, real in-tune zone, HTML labels ---------- */
+
+.pc-trace { position: relative; padding: 4px 64px 4px 26px; }
+.pc-trace .trace-svg { height: 104px; }
+.trace-zone.is-close { fill: var(--close); opacity: 0.12; }
+.trace-band { opacity: 0.22; }
+.pc-trace-axis {
+  position: absolute; left: 22px; top: 2px; bottom: 2px;
+  display: flex; flex-direction: column; justify-content: space-between;
+  font-size: 0.68rem; color: var(--text-muted); pointer-events: none;
+}
+.pc-trace-labels { position: absolute; top: 4px; bottom: 4px; right: 4px; width: 58px; pointer-events: none; }
+.pc-trace-label {
+  position: absolute;
+  left: 0;
+  transform: translateY(-50%);
+  font-size: 0.74rem;
+  font-weight: 700;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+.pc-trace-label.is-pure, .pc-trace-label.is-target { color: var(--ok-text); }
+.pc-trace-label.is-piano { color: var(--piano); }
+.producing .sing-cell .pc-trace-axis { left: 22px; }
+.producing .sing-name { position: static; display: block; padding: 0 10px 8px 30px; background: none; }
+
+/* ---------- After a round ---------- */
+.pc-result-tip { margin: 0; max-width: 52ch; text-align: center; }
+.pc-result-tip:empty, .pc-compare-holder:empty, .pc-tip-holder:empty, .pc-summary-holder:empty { display: none; }
+.pc-try-again { min-height: 52px; }
+
+/* ---------- Local fallbacks (used only until the shared components exist) ---------- */
+.pc-opts { padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
+.pc-opts-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.pc-opts-title { color: var(--text-muted); }
+.pc-opts-text { font-weight: 600; }
+.pc-opts-change { margin-left: auto; }
+.pc-opts-panel { margin-top: 10px; }
+.pc-opts-foot { display: flex; justify-content: flex-end; }
+.pc-action-bar { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; width: 100%; }
+.pc-keys { margin: 0; font-size: 0.85rem; color: var(--text-muted); text-align: center; }
+.pc-keys:empty { display: none; }
+@media (hover: none) and (pointer: coarse) { .pc-keys { display: none; } }
+.pc-feedback:empty { display: none; }
+.pc-feedback.is-in-tune { background: var(--ok-bg); border-color: var(--ok); color: var(--ok-text); }
+.pc-feedback.is-close { background: var(--close-bg); border-color: var(--close); color: var(--close-text); }
+.pc-feedback.is-keep-going { background: var(--surface-2); border-color: var(--border-strong); color: var(--text); }
+.pc-compare { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 8px; }
+.pc-seg { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.pc-seg-btn.is-on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.pc-tip, .pc-paused {
+  display: flex; gap: 10px; align-items: flex-start; max-width: 560px; width: 100%;
+  padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2);
+}
+.pc-tip p, .pc-paused p { margin: 0 0 8px; }
+.pc-paused-title { font-weight: 700; }
+
+/* ---------- Phones ---------- */
+@media (max-width: 599px) {
+  /* Your note's row: the slider gets its own full-width line (≥ 300 px), fine-tune buttons below. */
+  .producing.tune .tscore-row.is-target {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "note" "slider" "nudge";
+    row-gap: 4px;
+  }
+  .producing.tune .tscore-row.is-target .score-note::before { right: -10px; }
+  .producing .pc-slider-wrap { width: 100%; }
+  .producing .pc-slider-wrap .pc-end { display: none; }
+  .producing .pc-slider { height: 48px; }
+  .producing .tscore .nudge-row { width: 100%; gap: 6px; }
+  .producing .tscore .btn-nudge { flex: 1 1 0; min-width: var(--target, 44px); }
+  .pc-slider-wrap.is-answered { justify-content: center; }
+  .pc-hold-box .btn-hold { min-width: 0; width: 100%; }
+  .pc-trace { padding-right: 52px; }
+  .pc-trace-labels { width: 48px; }
+  .pc-action-bar {
+    position: sticky; bottom: var(--bottom-nav-h, 0px); z-index: 20; padding: 10px 0;
+    background: var(--surface); border-top: 1px solid var(--border);
+  }
+  .pc-action-bar .btn { flex: 1 1 0; min-width: 0; }
+  .producing .action-bar-inner .pc-hold-box { flex: 1 1 auto; }
+}
+
+/* ---------- QA round: spacing, phone wording, microphone row ---------- */
+/* Lock it in: keep the "lower" end label clear of your note's staff line */
+.producing.tune .tscore-row.is-target .score-note::before { right: -6px; }
+.producing .pc-slider-wrap { padding-left: 10px; }
+
+/* "Try again (same notes)" → "Again" on phones */
+.pc-try-again .pc-short { display: none; }
+
+/* Hands-free switch with its one-line explanation */
+.pc-switch-field { display: flex; flex-direction: column; gap: 2px; }
+.pc-switch-desc { margin: 0 0 0 52px; max-width: 46ch; }
+
+/* Microphone row: items never break inside; the row wraps between them */
+.producing .mic-bar { flex-wrap: wrap; gap: 4px 14px; }
+.pc-mic-state { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.producing .mic-bar .btn-link-inline, .producing .mic-bar .badge { white-space: nowrap; }
+.mic-status.is-blocked { color: var(--close-text); font-weight: 600; }
+
+/* Trace labels: right-aligned inside the trace box */
+.pc-trace-label { left: auto; right: 0; text-align: right; }
+
+@media (max-width: 599px) {
+  .pc-try-again .pc-long { display: none; }
+  .pc-try-again .pc-short { display: inline; }
+  .producing .sing-options { flex-direction: column; align-items: flex-start; }
+  .producing .mic-bar { margin-left: 0; }
+  .pc-switch-desc { margin-left: 0; }
+  .producing.tune .pc-slider-wrap { padding-left: 0; }
+  .pc-trace { padding-right: 44px; }
+  .pc-trace-labels { width: 40px; right: 4px; }
+  .pc-trace-label { font-size: 0.66rem; white-space: normal; line-height: 1; }
+}
+
+/* ---------- Compact layout (owner: "less scrolling on the phone") ---------- */
+/* Long / short wording: the short one is for phones (only one is ever displayed). */
+.pc-short { display: none; }
+.pc-phone-only { display: none; }
+
+@media (max-width: 599px) {
+  .pc-long { display: none; }
+  .pc-short { display: inline; }
+  .pc-phone-only { display: block; }
+
+  .producing .pc-head { margin-bottom: 6px; }
+  .producing .pc-head > .level { min-width: 0; max-width: 55vw; }
+  .producing .pc-head .level-main { font-size: 0.86rem; overflow: hidden; text-overflow: ellipsis; }
+  .producing .pc-head .level-label { display: none; } /* the task is named in the options line */
+  .producing .pc-head .task { margin: 0; font-size: 0.92rem; color: var(--text-muted); }
+
+  /* The task description is in "How it works" on phones. */
+  .producing .task-desc { display: none; }
+
+  .producing .stage { padding: 8px 8px 10px; gap: 8px; }
+  .producing .silent-hint { min-height: 0; padding: 4px 12px; font-size: 0.88rem; line-height: 1.3; }
+  .producing .done-note { display: none; }
+  .producing .stage-status:empty { display: none; }
+
+  /* Score rows: about 44 px each; the note label sits beside the note head. */
+  .producing .tscore-row { grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; padding: 0; }
+  .producing .score-note { min-height: 44px; justify-content: flex-start; gap: 6px; padding-left: 4px; }
+  .producing .score-note::before { left: 0; right: 0; }
+  .producing .score-head-btn { width: 44px; height: 44px; flex: none; }
+  .producing .score-verdict { display: none; }
+  .producing .tscore-lock { position: relative; left: auto; top: auto; transform: none; flex: none; }
+  .producing .score-label {
+    position: relative; left: auto; right: auto; bottom: auto;
+    padding: 0 6px; background: var(--surface); font-size: 0.86rem; text-align: left;
+  }
+  .producing .tscore-row.is-target .score-label { color: var(--accent); }
+  .producing .tscore-name { font-size: 0.9rem; padding-right: 2px; }
+
+  /* Lock it in: your note's row = note line, then the full-width slider, then the fine-tune buttons. */
+  .producing.tune .tscore-row.is-target { grid-template-columns: minmax(0, 1fr); grid-template-areas: "note" "slider" "nudge"; row-gap: 2px; }
+  .producing.tune .tscore-row.is-target .score-note::before { right: 0; }
+  .producing .pc-slider { height: var(--target, 44px); }
+  .producing .tscore-nudge { margin-bottom: 4px; }
+  .producing .tscore .btn-nudge { min-height: 40px; }
+  .producing .pc-slider-wrap.is-answered { justify-content: flex-start; padding-left: 50px; }
+  .producing .pc-your-result { font-size: 0.92rem; }
+  .producing .sound-row { flex-wrap: nowrap; gap: 6px; width: 100%; }
+  .producing .sound-row .btn { flex: 1 1 0; min-width: 0; padding-inline: 0.5rem; font-size: 0.88rem; }
+  .producing .sound-row .kbd { display: none; }
+
+  /* Singing: your row = a short trace beside the note head. */
+  .producing.sing .tscore-row.is-target { grid-template-columns: auto minmax(0, 1fr); }
+  .producing.sing .tscore-row.is-target .score-note { padding-right: 2px; }
+  .producing .sing-cell { min-height: 76px; }
+  .producing .sing-here { min-height: 74px; padding: 4px 8px; gap: 2px; }
+  .producing .pc-trace .trace-svg { height: 64px; }
+  .producing .pc-trace { padding: 2px 44px 2px 22px; }
+  .producing .pc-trace-axis { font-size: 0.6rem; }
+  .producing .sing-name { padding: 0 6px 4px 18px; font-size: 0.8rem; line-height: 1.25; }
+  .producing.pc-answered .sing-options { display: none; }
+  .producing .hold { max-width: none; }
+  .producing .hold .small { font-size: 0.8rem; white-space: nowrap; }
+  .producing .pc-hold-box { gap: 4px; }
+  .producing .pc-hold-msg.is-warn { padding: 4px 10px; font-size: 0.86rem; }
+
+  /* Hands-free + microphone: one compact line (the explanation stays for screen readers). */
+  .producing .sing-options { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 2px 12px; margin-bottom: 6px; }
+  .producing .pc-switch-desc { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .producing .sing-options .switch { min-height: 36px; font-size: 0.92rem; }
+  .producing .mic-bar { margin-left: auto; gap: 2px 8px; font-size: 0.86rem; }
+  .producing .mic-bar .mic-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .producing .mic-bar .mic-status.is-blocked { position: static; width: auto; height: auto; clip: auto; }
+  .producing .pc-mic-state .icon { color: var(--text-muted); }
+  .producing .mic-bar:has(.mic-status.is-on) .pc-mic-state .icon { color: var(--ok); }
+  .producing .mic-bar .btn-link-inline { min-height: 36px; }
+  .producing .mic-bar .badge { display: none; }
+
+  /* After a result: rank line and octave note smaller (they sit below the compare switch). */
+  .producing .after-answer { gap: 8px; }
+  .producing .pc-compare-holder, .producing .pc-compare-holder .compare-switch { width: 100%; }
+  .producing .octave-note, .producing .task-rank-line { font-size: 0.84rem; }
+  .producing .result-figure figcaption { display: none; }
+}

@@ -78,7 +78,7 @@ export function createPlayer({ onChange = () => {}, pauseMs = 500 } = {}) {
       if (typeof engine.setReverb === 'function') engine.setReverb(s.reverb);
     } catch (err) {
       console.error(err);
-      emit({ playing: false, label: '', tag: null, error: 'Sound could not be started in this browser.' });
+      emit({ playing: false, label: '', tag: null, error: "Sound can't start in this browser. Reload the page." });
       return false;
     }
     const key = timbre || getSettings().timbre;
@@ -87,7 +87,7 @@ export function createPlayer({ onChange = () => {}, pauseMs = 500 } = {}) {
       const ok = await ensureTimbre(key);
       if (mine !== generation || destroyed) return false;
       if (!ok) {
-        emit({ playing: false, label: '', tag: null, error: 'This sound could not be loaded. Try another sound in Settings.' });
+        emit({ playing: false, label: '', tag: null, error: "This sound didn't load. Choose another sound in Settings." });
         return false;
       }
     }

@@ -1,22 +1,34 @@
-// Settings (#/settings): tuning, voice part, sound, volume & room echo, sound check,
-// setup again, reset all progress, credits. Every change is saved immediately.
+// Settings (#/settings): tuning, voice parts, sound, volume & room echo, sound quality, keyboard,
+// microphone (incl. hands-free singing), sound check, setup again, backup, reset all progress, credits.
+// Every change is saved immediately.
 
 import { TUNINGS } from '../music/tuning.js';
-// Namespace imports: optional features (setReverb, resetAllProgress) are checked with typeof.
+// Namespace imports: optional features (setReverb, setAudioQuality, resetAllProgress) are checked with typeof.
 import * as engine from '../audio/engine.js';
 import * as progress from '../exercise/progress.js';
 import { getSettings, updateSettings } from '../storage.js';
 import { el } from '../ui/dom.js';
 import { icon } from '../ui/icons.js';
-import { helpBox, choiceCards } from '../ui/components.js';
+import { helpBox, choiceCards, switchControl, segmented } from '../ui/components.js';
 import { confirmAction } from '../ui/exercise.js';
 import { voicePicker, soundPicker } from '../ui/sound-picker.js';
+import { createBackupControls, backupAvailable } from '../ui/backup.js';
 import { micSetupPanel, micSetupDone } from '../ui/sing-common.js';
 
 const TUNING_CHOICES = [
-  { value: TUNINGS.JUST, label: 'Pure (choir)', detail: 'Just intonation: chords fit together perfectly and sound calm. Thirds are lower than on a piano.' },
-  { value: TUNINGS.EQUAL, label: 'Piano', detail: 'Equal temperament: every semitone the same size, like a keyboard.' },
+  { value: TUNINGS.JUST, label: 'Pure (choir tuning)', detail: 'Chords sound calm because the notes fit perfectly. Thirds are lower than on a piano. (Also called just intonation.)' },
+  { value: TUNINGS.EQUAL, label: 'Piano (equal steps)', detail: 'Like a keyboard: every semitone is the same size, so chords wobble slightly. (Also called equal temperament.)' },
 ];
+
+const QUALITY_CHOICES = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'high', label: 'High' },
+  { value: 'light', label: 'Light (for phones)' },
+];
+
+const PRIVACY_MIC = 'Your singing is analysed on this device. The recording is deleted when you leave the page; only your results are saved.';
+const MIC_SET = 'Set up. Check it again any time, for example with new headphones or another microphone.';
+const MIC_NOT_SET = 'Not set up yet. The singing exercises ask for it the first time.';
 
 const CHAPTER_KEYS = ['higher-or-lower', 'odd-one-out', 'tune-it'];
 
@@ -57,23 +69,36 @@ function resetAll() {
   for (const key of CHAPTER_KEYS) progress.resetProgress(key); // older logic module
 }
 
+/** "Now: light — this device is a phone" (what the engine actually uses). */
+function qualityNow() {
+  if (typeof engine.getAudioQualityInfo !== 'function') return '';
+  try {
+    const info = engine.getAudioQualityInfo();
+    if (!info || !info.effective) return '';
+    return `In use now: ${info.effective === 'light' ? 'light' : 'high'}.`;
+  } catch {
+    return '';
+  }
+}
+
 export default {
   id: 'settings',
   title: 'Settings',
 
   render(container) {
     const settings = getSettings();
-    const sound = soundPicker();
+    const sound = soundPicker({ heading: true });
 
     const tuning = choiceCards({
       legend: 'Tuning',
+      heading: true,
       help: 'What "in tune" means in the exercises.',
       value: settings.tuning,
       options: TUNING_CHOICES,
       onChange: (v) => updateSettings({ tuning: v }),
     });
 
-    // ---- Volume & room echo
+    // ---- Volume, room echo, sound quality
     const vol = slider({
       id: 'set-volume',
       value: settings.volume,
@@ -90,6 +115,27 @@ export default {
         updateSettings({ reverb: v });
       },
     }) : null;
+
+    let qualityBlock = null;
+    if (typeof engine.setAudioQuality === 'function') {
+      const qualityNote = el('p', { class: 'small muted', role: 'status' }, qualityNow());
+      const seg = segmented({
+        name: 'quality',
+        legend: 'Sound quality',
+        hideLegend: true,
+        options: QUALITY_CHOICES,
+        value: settings.audioQuality || 'auto',
+        onChange: (v) => {
+          updateSettings({ audioQuality: v }); // main.js passes it to the engine
+          setTimeout(() => { qualityNote.textContent = `${qualityNow()} It takes effect at the next sound.`; }, 0);
+        },
+      });
+      qualityBlock = el('div', { class: 'setting-block' },
+        el('h2', { class: 'card-title' }, 'Sound quality'),
+        el('p', { class: 'help muted small' }, 'Light uses less computing power. Choose it if notes crackle or stutter, for example on a phone. Tuning is exact in all three.'),
+        seg.element,
+        qualityNote);
+    }
 
     const playback = el('div', { class: 'card' },
       el('h2', { class: 'card-title' }, el('label', { for: 'set-volume' }, 'Volume')),
@@ -112,7 +158,19 @@ export default {
           echo.output,
         ),
       ) : null,
+      qualityBlock,
     );
+
+    // ---- Keyboard
+    const keysSwitch = switchControl({
+      label: 'Single-key shortcuts',
+      checked: settings.keyShortcuts !== false,
+      description: 'Letters and numbers as shortcuts (for example R to play again). Turn this off if you use voice control or speech input. Arrows, Space, Enter and Esc always work.',
+      onChange: (on) => updateSettings({ keyShortcuts: on }),
+    });
+    const keysCard = el('div', { class: 'card' },
+      el('h2', { class: 'card-title' }, 'Keyboard'),
+      keysSwitch.element);
 
     // ---- Sound check + setup again
     const tools = el('div', { class: 'card link-card' },
@@ -120,7 +178,7 @@ export default {
         icon('headphones', { size: 22 }),
         el('span', { class: 'link-row-text' },
           el('strong', {}, 'Sound check'),
-          el('span', { class: 'muted small' }, 'Hear pure vs piano chords and how "beating" sounds.'),
+          el('span', { class: 'muted small' }, 'Hear pure and piano chords side by side, and what the wobble sounds like.'),
         ),
         icon('chevron-right', { size: 20 }),
       ),
@@ -128,7 +186,7 @@ export default {
         icon('rotate-ccw', { size: 22 }),
         el('span', { class: 'link-row-text' },
           el('strong', {}, 'Run setup again'),
-          el('span', { class: 'muted small' }, 'Voice part, sound and a quick listen — in three steps.'),
+          el('span', { class: 'muted small' }, 'Voice part, sound and a quick listen, in three steps.'),
         ),
         icon('chevron-right', { size: 20 }),
       ),
@@ -137,51 +195,82 @@ export default {
     // ---- Microphone (for the singing exercises)
     let micPanel = null;
     const micArea = el('div', { class: 'mic-settings-area' });
-    const micLine = el('p', { class: 'small muted' }, micSetupDone()
-      ? 'Set up. Check it again any time — for example with new headphones or a different microphone.'
-      : 'Not set up yet. The singing exercises ask for it the first time.');
-    const micBtn = el('button', {
-      type: 'button',
-      class: 'btn btn-small',
-      onclick: () => {
-        if (micPanel) { micPanel.destroy(); micPanel = null; micArea.replaceChildren(); return; }
-        micPanel = micSetupPanel({
-          title: 'Check your microphone',
-          onDone: () => {
-            micPanel.destroy();
-            micPanel = null;
-            micArea.replaceChildren(el('p', { class: 'small mic-ok', role: 'status' }, 'Microphone checked — all set.'));
-            micLine.textContent = 'Set up. Check it again any time — for example with new headphones or a different microphone.';
-          },
-        });
-        micArea.replaceChildren(micPanel.element);
-      },
-    }, icon('mic', { size: 16 }), 'Check microphone');
+    const micStatus = el('p', { class: 'small mic-ok', role: 'status' });
+    const micLine = el('p', { class: 'small muted' }, micSetupDone() ? MIC_SET : MIC_NOT_SET);
+    const micBtnLabel = el('span', { class: 'btn-label' }, 'Check microphone');
+    const micBtnIcon = el('span', { class: 'btn-icon' }, icon('mic', { size: 16 }));
+    const micBtn = el('button', { type: 'button', class: 'btn btn-small', 'aria-expanded': 'false' }, micBtnIcon, micBtnLabel);
+    function closeMic({ focus = false } = {}) {
+      if (micPanel) { micPanel.destroy(); micPanel = null; }
+      micArea.replaceChildren();
+      micBtnLabel.textContent = 'Check microphone';
+      micBtnIcon.replaceChildren(icon('mic', { size: 16 }));
+      micBtn.setAttribute('aria-expanded', 'false');
+      if (focus) micBtn.focus();
+    }
+    micBtn.addEventListener('click', () => {
+      if (micPanel) { closeMic(); return; }
+      micStatus.textContent = '';
+      micPanel = micSetupPanel({
+        title: 'Check your microphone',
+        onDone: () => {
+          closeMic({ focus: true });
+          micStatus.textContent = 'Microphone ready.';
+          micLine.textContent = MIC_SET;
+        },
+      });
+      micArea.replaceChildren(micPanel.element);
+      micBtnLabel.textContent = 'Close';
+      micBtnIcon.replaceChildren(icon('x', { size: 16 }));
+      micBtn.setAttribute('aria-expanded', 'true');
+      if (typeof micPanel.focusTitle === 'function') {
+        try { micPanel.focusTitle(); } catch (err) { console.error(err); }
+      }
+    });
+    const handsFree = switchControl({
+      label: 'Hands-free singing',
+      checked: !!settings.handsFree,
+      description: 'Tap once to start; it stops by itself when you stop singing. (A 3-2-1 count-in comes first; tap again to stop early.)',
+      onChange: (on) => updateSettings({ handsFree: on }),
+    });
     const micCard = el('div', { class: 'card' },
       el('h2', { class: 'card-title' }, 'Microphone'),
-      el('p', { class: 'help muted small' }, 'Used only by "Echo" and "Join the chord". The sound is analysed on this device and never uploaded.'),
+      el('p', { class: 'help muted small' }, `Used only by Echo and Join the chord. ${PRIVACY_MIC}`),
       micLine,
-      micBtn,
+      el('div', { class: 'btn-row mic-row' }, micBtn),
+      micStatus,
       micArea,
+      el('div', { class: 'setting-block' }, handsFree.element),
     );
 
-    // ---- Danger zone
-    const danger = el('section', { class: 'card danger-zone', 'aria-labelledby': 'danger-title' },
-      el('h2', { class: 'card-title', id: 'danger-title' }, 'Reset all progress'),
-      confirmAction({
-        intro: 'Clears your levels, ranks and history in every chapter on this device. Your settings stay as they are.',
-        buttonLabel: 'Reset all progress',
-        confirmText: 'Are you sure? All your progress in every chapter will be deleted. This cannot be undone.',
-        yesLabel: 'Yes, reset everything',
-        doneText: 'All progress has been reset.',
-        danger: true,
-        onConfirm: resetAll,
-      }),
+    // ---- Your progress: backup + reset
+    const backup = backupAvailable() ? createBackupControls({
+      onImported: () => {
+        // Settings may have come from the backup too: draw this page again.
+        window.dispatchEvent(new HashChangeEvent('hashchange'));
+      },
+    }) : null;
+    const danger = el('section', { class: 'card progress-card', 'aria-labelledby': 'progress-title' },
+      el('h2', { class: 'card-title', id: 'progress-title' }, 'Your progress'),
+      backup ? el('div', { class: 'progress-backup' },
+        el('h3', { class: 'settings-h3' }, 'Backup'),
+        backup.element) : null,
+      el('div', { class: `danger-block${backup ? ' setting-block' : ''}` },
+        el('h3', { class: 'settings-h3' }, 'Reset all progress'),
+        confirmAction({
+          intro: 'Clears your levels, ranks and history in every exercise on this device. Your settings stay as they are.',
+          buttonLabel: 'Reset all progress',
+          confirmText: "Reset all progress in every exercise? This can't be undone.",
+          yesLabel: 'Reset everything',
+          doneText: 'All progress reset.',
+          danger: true,
+          onConfirm: resetAll,
+        })),
     );
 
     // ---- About & credits
     const about = helpBox({ summary: 'About & credits' },
-      el('p', {}, 'Choir Intonation Trainer — short listening exercises that help choir singers hear and sing in tune.'),
+      el('p', {}, 'Choir Intonation Trainer: short exercises that help choir singers hear and sing in tune.'),
       el('h3', { class: 'credits-title' }, 'Created by'),
       el('p', {}, 'Michelle Scharte · ',
         ext('https://github.com/Pfefferhonig/IntonationTrainer', 'Project on GitHub')),
@@ -205,15 +294,16 @@ export default {
       el('div', { class: 'screen-head' },
         el('div', {},
           el('h1', {}, 'Settings'),
-          el('p', { class: 'task' }, 'Saved automatically. Everything stays on this device: your settings and progress are stored only in this browser, and your singing is analysed right here. Recordings are kept just long enough to play them back and are never saved or uploaded; only the results (numbers) are kept.'),
+          el('p', { class: 'task' }, 'Saved automatically on this device. Everything stays here: your progress, and your singing, which is analysed on this device and never uploaded or saved.'),
         ),
       ),
       tuning,
-      voicePicker(),
+      voicePicker({ heading: true }),
       sound.element,
       playback,
       tools,
       micCard,
+      keysCard,
       danger,
       about,
     ));

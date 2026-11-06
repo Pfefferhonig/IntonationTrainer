@@ -5,7 +5,7 @@
 
 import {
   INTERVALS, TUNINGS, centsBetween, shiftByCents, intervalCents, compareToTunings, randomRootFreq,
-  describeFreq,
+  describeFreq, formatCents, roundCents, CHORDS, rootName, spellInterval, deviation,
 } from '../music/tuning.js';
 import { createErrorStore, REGISTER_MIN_ATTEMPTS, INSIGHT_MIN_ATTEMPTS, TENDENCY_MIN_CENTS } from './error-store.js';
 
@@ -40,42 +40,42 @@ const noun = (k) => toneLabel(k).toLowerCase();
 export const TUNE_TASKS = Object.freeze([
   // --- intervals, smallest first ---
   { key: 'minor-second', label: 'Minor second', fixed: ['P1'], target: 'm2',
-    description: 'Tune the smallest step, a half step above the lower note (the "Jaws" theme). Seconds rub by nature, so don\'t wait for stillness: listen for the most settled, even rub. A choir tunes it a little wider than the piano.' },
+    description: 'Tune a half step above the lower note (the "Jaws" theme). Seconds always wobble a little, so listen for the calmest wobble, not for stillness. Choirs tune it a little wider than the piano.' },
   { key: 'major-second', label: 'Major second', fixed: ['P1'], target: 'M2',
-    description: 'Tune a whole step above the lower note, like the first two notes of "Frère Jacques". Seconds rub by nature, so listen for the most settled, even rub rather than for stillness.' },
+    description: 'Tune a whole step above the lower note, like the start of "Frère Jacques". Seconds always wobble a little, so listen for the calmest wobble, not for stillness.' },
   { key: 'minor-third', label: 'Minor third', fixed: ['P1'], target: 'm3',
-    description: 'Tune a darker minor third above the lower note. A choir sings it a little higher than a piano plays it.' },
+    description: 'Tune a minor third above the lower note. Choirs sing it a little higher than the piano.' },
   { key: 'major-third', label: 'Major third', fixed: ['P1'], target: 'M3',
-    description: 'Tune a bright major third above the lower note. A choir sings it lower than a piano plays it.' },
+    description: 'Tune a major third above the lower note. Choirs sing it lower than the piano.' },
   { key: 'fourth', label: 'Fourth', fixed: ['P1'], target: 'P4',
-    description: 'Tune the upper note a fourth above the lower one (like "Here Comes the Bride"). Listen for the wobble to stop.' },
+    description: 'Tune a fourth above the lower note (like "Here Comes the Bride"). Move it until the wobble stops.' },
   { key: 'tritone', label: 'Tritone', fixed: ['P1'], target: 'TT',
-    description: 'Tune the tritone, the restless "devil\'s interval" (the start of "Maria" from West Side Story). Honestly: it has no fully calm, pure-sounding version — it keeps a restless edge even when well tuned — so it is the hardest interval to tune by ear. The target here is the 45/32 tuning, a little below the piano\'s.' },
+    description: 'Tune the tritone (the start of "Maria" from West Side Story). It never sounds fully calm, so it\'s the hardest to tune by ear. The target is a little below the piano\'s.' },
   { key: 'fifth', label: 'Fifth', fixed: ['P1'], target: 'P5',
-    description: 'Tune the upper note a fifth above the lower one (the leap at the start of "Twinkle, Twinkle, Little Star"). In tune, it sounds open and still.' },
+    description: 'Tune a fifth above the lower note (the leap at the start of "Twinkle, Twinkle, Little Star"). In tune, it sounds open and calm.' },
   { key: 'minor-sixth', label: 'Minor sixth', fixed: ['P1'], target: 'm6',
-    description: 'Tune a wide, bittersweet minor sixth above the lower note. A choir sings it a little higher than a piano plays it.' },
+    description: 'Tune a minor sixth above the lower note. Choirs sing it a little higher than the piano.' },
   { key: 'major-sixth', label: 'Major sixth', fixed: ['P1'], target: 'M6',
-    description: 'Tune a warm major sixth above the lower note, like the start of "My Bonnie Lies over the Ocean" ("My BON-nie"). A choir sings it lower than a piano plays it.' },
+    description: 'Tune a major sixth above the lower note, like the start of "My Bonnie Lies over the Ocean". Choirs sing it lower than the piano.' },
   { key: 'minor-seventh', label: 'Minor seventh', fixed: ['P1'], target: 'm7',
-    description: 'Tune a minor seventh above the lower note (the leap at the start of "Somewhere" from West Side Story: "There\'s a place"). For the plain interval we use the pure 9/5 tuning, a little higher than the piano; inside a dominant seventh chord a choir often sings the seventh lower (see the chord task).' },
+    description: 'Tune a minor seventh above the lower note ("Somewhere": "There\'s a place"). Here it\'s a little higher than the piano; in a dominant 7th chord, choirs sing it lower.' },
   { key: 'major-seventh', label: 'Major seventh', fixed: ['P1'], target: 'M7',
-    description: 'Tune a major seventh: it sits just below the octave and leans up towards it. A choir tunes it a little lower than the piano.' },
+    description: 'Tune a major seventh. It sits just below the octave. Choirs tune it a little lower than the piano.' },
   { key: 'octave', label: 'Octave', fixed: ['P1'], target: 'P8',
-    description: 'Tune the upper note so it sits exactly an octave above the lower one. When it is right, the two notes melt into one.' },
+    description: 'Tune the upper note exactly an octave above the lower one. In tune, the two notes sound like one.' },
   // --- in a chord: major, minor, dominant 7th, major 7th ---
   { key: 'third-in-major', label: 'Third in a major chord', fixed: ['P1', 'P5'], target: 'M3',
-    description: 'The root and fifth are given. Tune the middle note to make a glowing major chord.' },
+    description: 'The root and fifth are fixed. Tune the middle note until the major chord sounds calm.' },
   { key: 'fifth-in-major', label: 'Fifth in a major chord', fixed: ['P1', 'M3'], target: 'P5',
-    description: 'The root and third are given. Tune the top note so the whole chord rings.' },
+    description: 'The root and third are fixed. Tune the top note until the major chord sounds calm.' },
   { key: 'third-in-minor', label: 'Third in a minor chord', fixed: ['P1', 'P5'], target: 'm3',
-    description: 'The root and fifth are given. Tune the middle note to make a calm, in-tune minor chord.' },
-  { key: 'fifth-in-minor', label: 'Fifth (minor)', fixed: ['P1', 'm3'], target: 'P5',
-    description: 'The root and minor third are given. Tune the top note so the minor chord settles and rings.' },
+    description: 'The root and fifth are fixed. Tune the middle note until the minor chord sounds calm.' },
+  { key: 'fifth-in-minor', label: 'Fifth in a minor chord', fixed: ['P1', 'm3'], target: 'P5',
+    description: 'The root and minor third are fixed. Tune the top note until the minor chord sounds calm.' },
   { key: 'seventh-in-dom7', label: 'Seventh in a dominant 7th chord', fixed: ['P1', 'M3', 'P5'], target: 'h7',
-    description: 'Root, third and fifth are given. Tune the seventh on top. A choir (and every barbershop quartet) sings it much lower than the piano, about a third of a semitone, where the chord suddenly locks and rings.' },
-  { key: 'seventh-in-maj7', label: 'Seventh (major 7th)', fixed: ['P1', 'M3', 'P5'], target: 'M7',
-    description: 'Root, third and fifth are given. Tune the major seventh on top: it sits just below the octave, and a choir tunes it a little lower than the piano.' },
+    description: 'The root, third and fifth are fixed. Tune the seventh on top. Choirs and barbershop quartets sing it about 31 cents lower than the piano; then the chord rings.' },
+  { key: 'seventh-in-maj7', label: 'Seventh in a major 7th chord', fixed: ['P1', 'M3', 'P5'], target: 'M7',
+    description: 'The root, third and fifth are fixed. Tune the major seventh on top. Choirs tune it a little lower than the piano.' },
 ].map((t) => Object.freeze({
   ...t,
   // 'interval' = two notes; 'chord' = the target is tuned inside a chord (the UI's two modes)
@@ -181,28 +181,64 @@ export function ratingFor(absError) {
   return 'off';
 }
 
-const centsText = (c) => {
-  const v = Math.round(Math.abs(c));
-  return `${v} ${v === 1 ? 'cent' : 'cents'}`;
-};
+const centsText = formatCents; // the one rule for showing cents (tuning.js)
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+
+/** Feedback level for an absolute error in cents: ≤7 'in-tune' (Spot on ≤3 / Good ≤7), ≤15 'close', else 'keep-going'. */
+export function levelFor(absError) {
+  const r = ratingFor(absError);
+  return r === 'excellent' || r === 'good' ? 'in-tune' : r === 'close' ? 'close' : 'keep-going';
+}
+
+/** Plain interval names used in feedback ("the pure major third"). */
+const FEEDBACK_NAMES = {
+  P1: 'unison', m2: 'minor second', M2: 'major second', m3: 'minor third', M3: 'major third', P4: 'fourth',
+  TT: 'tritone', P5: 'fifth', m6: 'minor sixth', M6: 'major sixth', m7: 'minor seventh', M7: 'major seventh',
+  P8: 'octave', h7: 'seventh',
+};
+
+/**
+ * Feedback text for a produced note (shared by Lock it in, Echo and Join the chord; UX-WRITING
+ * "Message patterns"). errorCents: signed, + = above the target. target: e.g. 'the pure major third'.
+ * -> first line: 'Spot on — 2 cents above the pure major third. That's how a choir tunes it.' etc.
+ * @param {{errorCents: number, target: string, spotOnExtra?: string|null, keepGoingTail?: string}} p
+ */
+export function producingMessage({ errorCents, target, spotOnExtra = null, keepGoingTail = null }) {
+  const rating = ratingFor(Math.abs(errorCents));
+  const where = roundCents(errorCents) === 0
+    ? `right on ${target}`
+    : `${centsText(errorCents)} ${errorCents > 0 ? 'above' : 'below'} ${target}`;
+  const hint = errorCents > 0 ? 'lower' : 'higher';
+  if (rating === 'excellent') return `Spot on — ${where}.${spotOnExtra ? ` ${spotOnExtra}` : ''}`;
+  if (rating === 'good') return `Good — ${where}. A touch ${hint} next time.`;
+  if (rating === 'close') return `Close — ${where}. Try a little ${hint}.`;
+  return `Keep going — ${where}. ${keepGoingTail || `Go ${hint} and listen for the wobble to slow down.`}`;
+}
 
 /**
  * Evaluate where the singer left the slider.
  * errorCents is signed vs the target in the chosen tuning and always describes the SINGER'S
- * NOTE: positive = sharp / too high. (For motion 'down' a too-low lower note means a wider
+ * NOTE: positive = above / too high. (For motion 'down' a too-low lower note means a wider
  * interval, so errorCents = -(interval error); `comparison` (compareToTunings) is about the
  * interval size, so its signs mean wider/narrower.)
  * Also returns midi: the nearest piano note of the in-tune target (for register stats),
  * intervalCents: the size of the interval produced, and motion.
  * centsAboveRoot is the played note relative to rootFreq (negative for motion 'down').
+ * message: first line (UX-WRITING patterns): 'Spot on — 2 cents above the pure major third. That's how a
+ *   choir tunes it.' / 'Good — … A touch higher next time.' / 'Close — … Try a little lower.' /
+ *   'Keep going — … Go higher and listen for the wobble to slow down.'; when the note is nearer the
+ *   OTHER tuning (and not Spot on): "That's the piano major third (2 cents off). Pure is 14 cents lower —
+ *   try a little lower." / "That's the pure major third — how a choir tunes it. For piano tuning, go 14
+ *   cents higher."  detail: optional second line (seventh tips) or null.
+ * level: 'in-tune' (≤7 cents) | 'close' (≤15) | 'keep-going'.
  * @param {object} question from makeQuestion (or sing.makeSingQuestion) @param {number} playedFreq
- * @param {{verb?: string}} [opts] verb used in "You ___ it like a choir would." ('tuned' | 'sang')
+ * @param {object} [opts] (kept for compatibility; unused)
  * @returns {{centsAboveRoot: number, intervalCents: number, errorCents: number, absError: number,
- *   comparison: object, rating: 'excellent'|'good'|'close'|'off', message: string, midi: number,
- *   motion: 'up'|'down'}}
+ *   comparison: object, rating: 'excellent'|'good'|'close'|'off', level: string, message: string,
+ *   detail: string|null, midi: number, motion: 'up'|'down'}}
  */
-export function evaluate(question, playedFreq, { verb = 'tuned' } = {}) {
+// eslint-disable-next-line no-unused-vars
+export function evaluate(question, playedFreq, opts = {}) {
   const key = question.target.intervalKey;
   const tuning = question.tuning;
   const down = question.motion === 'down';
@@ -216,56 +252,41 @@ export function evaluate(question, playedFreq, { verb = 'tuned' } = {}) {
   const iv = INTERVALS[key];
   const gap = iv.equalCents - iv.justCents;
   const tuningsDiffer = Math.abs(gap) > 3;
-  const n = down ? `${noun(key)} below` : noun(key);
-
-  const pureName = `the pure ${n}`;
-  const pianoName = `the piano's ${n}`;
-  const chosenName = !tuningsDiffer ? `the ${n}` : tuning === TUNINGS.JUST ? pureName : pianoName;
-  const where = Math.round(absError) === 0
-    ? `right on ${chosenName}`
-    : `${centsText(errorCents)} ${errorCents > 0 ? 'sharp' : 'flat'} of ${chosenName}`;
-  const hint = errorCents > 0 ? 'lower' : 'higher';
+  const n = down ? `${FEEDBACK_NAMES[key]} below` : FEEDBACK_NAMES[key];
+  const chosenWord = tuning === TUNINGS.JUST ? 'pure' : 'piano';
+  const target = tuningsDiffer ? `the ${chosenWord} ${n}` : `the ${n}`;
 
   let message;
   const other = tuning === TUNINGS.JUST ? TUNINGS.EQUAL : TUNINGS.JUST;
   if (tuningsDiffer && comparison.nearest === other && rating !== 'excellent') {
-    // Closer to the other tuning's target than to the chosen one.
-    const otherFrom = other === TUNINGS.JUST ? comparison.centsFromJust : comparison.centsFromEqual;
-    const otherName = other === TUNINGS.JUST ? pureName : pianoName;
-    const lead = Math.round(Math.abs(otherFrom)) === 0
-      ? `You landed right on ${otherName}`
-      : `You landed ${centsText(otherFrom)} from ${otherName}`;
-    const tail = tuning === TUNINGS.JUST
-      ? `In a choir, try a little ${hint}.`
-      : `That is how a choir would tune it; to match the piano, try a little ${hint}.`;
-    message = `${lead} — ${centsText(errorCents)} ${errorCents > 0 ? 'higher' : 'lower'} than ${chosenName}. ${tail}`;
-  } else if (rating === 'excellent') {
-    let extra = 'Beautifully in tune.';
-    if (tuningsDiffer) {
-      extra = tuning === TUNINGS.JUST ? `You ${verb} it like a choir would.` : 'That matches the piano exactly.';
+    // Nearer the other tuning's target than the chosen one. Direction of the CHOSEN target seen
+    // from the other one, for the note being tuned (for 'down' the lower note moves the other way).
+    const chosenFreq = tuning === TUNINGS.JUST ? question.target.justFreq : question.target.equalFreq;
+    const otherFreq = tuning === TUNINGS.JUST ? question.target.equalFreq : question.target.justFreq;
+    const toChosen = centsBetween(otherFreq, chosenFreq);
+    const way = toChosen > 0 ? 'higher' : 'lower';
+    const apart = centsText(toChosen);
+    if (tuning === TUNINGS.JUST) {
+      const off = other === TUNINGS.JUST ? comparison.centsFromJust : comparison.centsFromEqual;
+      const offText = roundCents(off) === 0 ? '' : ` (${centsText(off)} off)`;
+      message = `That's the piano ${n}${offText}. Pure is ${apart} ${way} — try a little ${way}.`;
+    } else {
+      message = `That's the pure ${n} — how a choir tunes it. For piano tuning, go ${apart} ${way}.`;
     }
-    message = `Excellent — ${where}. ${extra}`;
-  } else if (rating === 'good') {
-    let extra = `Nearly there: a touch ${hint}.`;
-    if (tuningsDiffer && tuning === TUNINGS.JUST) extra = `Closer to the choir's tuning than the piano's — a touch ${hint} and it will ring.`;
-    message = `Good — ${where}. ${extra}`;
-  } else if (rating === 'close') {
-    message = `Close — ${where}. Try a little ${hint}.`;
   } else {
-    message = `Not yet — ${where}. Try ${hint}, and listen for the wobble to slow down.`;
+    message = producingMessage({
+      errorCents,
+      target,
+      spotOnExtra: tuning === TUNINGS.JUST ? "That's how a choir tunes it." : 'That matches the piano.',
+    });
   }
 
-  // (These explanations describe the upper note, so they are only added for ascending questions.)
+  // Second line (tips about the upper note, so only for ascending questions).
+  let detail = null;
   if (key === 'h7' && !down) {
-    const apart = centsText(gap);
-    message += tuning === TUNINGS.JUST
-      ? ` The pure "barbershop" seventh sits about ${apart} lower than the piano's seventh — that is what makes the chord lock and ring.`
-      : ` The piano's seventh is about ${apart} higher than the pure "barbershop" seventh a choir would sing.`;
+    detail = `Tip: the pure "barbershop" seventh is about ${centsText(gap)} lower than the piano's. That's what makes the chord ring.`;
   } else if (key === 'M7' && !down) {
-    const apart = centsText(gap);
-    message += tuning === TUNINGS.JUST
-      ? ` The major seventh sits just below the octave; a choir tunes it about ${apart} lower than the piano.`
-      : ` The major seventh sits just below the octave; the piano's is about ${apart} higher than the pure one a choir would tune.`;
+    detail = `Tip: the major seventh sits just below the octave. Pure is about ${centsText(gap)} lower than piano.`;
   }
 
   return {
@@ -275,7 +296,9 @@ export function evaluate(question, playedFreq, { verb = 'tuned' } = {}) {
     absError,
     comparison,
     rating,
+    level: levelFor(absError),
     message,
+    detail,
     midi: describeFreq(question.target.targetFreq).midi,
     motion: down ? 'down' : 'up',
   };
@@ -285,6 +308,14 @@ export function evaluate(question, playedFreq, { verb = 'tuned' } = {}) {
  * What sounded / what was asked, for after the answer.
  * title e.g. 'Major third above D4 −8'; notes: the fixed tones, then the target.
  * The target's `played` is playedFreq if given (optional), else the in-tune target.
+ * (title / notes name notes on the piano grid; kept until the UI uses the fields below.)
+ * New, spelled for the key and compared to the TARGET (no piano offsets):
+ *   heading: 'Major third above D4' | 'Fifth below A4' | 'D major' (chord tasks),
+ *   chord: 'D major' | null,
+ *   tones: [{ label, name: 'F♯4', deviation: { cents, text } | null, secondary: {...} | null,
+ *             isOff: false, isYours }]  — fixed tones name only; your note (last) gets
+ *             deviation '8 cents above pure' and secondary '6 cents below piano' when playedFreq is given,
+ *   yourNote: { name, deviation, secondary, text: 'F♯4 · 8 cents above pure' } | null.
  * @param {object} question from makeQuestion @param {number} [playedFreq]
  */
 export function describe(question, playedFreq) {
@@ -295,15 +326,77 @@ export function describe(question, playedFreq) {
     return { label: t.label, name: d.name, cents: d.cents, played: d, inTune: d };
   });
   const inTune = describeFreq(question.target.targetFreq);
-  const played = typeof playedFreq === 'number' && playedFreq > 0 ? describeFreq(playedFreq) : inTune;
+  const hasPlayed = typeof playedFreq === 'number' && playedFreq > 0;
+  const played = hasPlayed ? describeFreq(playedFreq) : inTune;
   let title;
   if (task.group === 'interval') title = `${task.label} ${question.motion === 'down' ? 'below' : 'above'} ${root.text}`;
   else if (task.label.includes('(')) title = `${task.label}, root ${root.text}`;
   else title = `${task.label} (root ${root.text})`;
+
+  // New (design critique #1): names spelled for the interval / chord, deviation vs the TARGET only.
+  const sp = spellTask(question);
+  const yours = hasPlayed ? targetDeviation(question, playedFreq) : { deviation: null, secondary: null };
   return {
     title,
     notes: [...fixed, { label: question.target.label, name: played.name, cents: played.cents, played, inTune }],
+    heading: sp.heading,
+    chord: sp.chord,
+    tones: [
+      ...question.fixedTones.map((t, i) => ({ label: t.label, name: sp.fixed[i].name, deviation: null, secondary: null, isOff: false, isYours: false })),
+      { label: question.target.label, name: sp.target.name, deviation: yours.deviation, secondary: yours.secondary, isOff: false, isYours: true },
+    ],
+    yourNote: hasPlayed ? { name: sp.target.name, deviation: yours.deviation, secondary: yours.secondary,
+      text: `${sp.target.name} · ${yours.deviation.text}` } : null,
   };
+}
+
+/** Chord of each chord task (for the heading 'D major', 'B♭ dominant 7th'). */
+const TASK_CHORDS = {
+  'third-in-major': 'major', 'fifth-in-major': 'major', 'third-in-minor': 'minor', 'fifth-in-minor': 'minor',
+  'seventh-in-dom7': 'dom7', 'seventh-in-maj7': 'maj7',
+};
+
+/**
+ * Note names of a tune-it / sing question, spelled for the key: the reference note by its nearest
+ * key name, every other tone by interval from it (descending: downwards from the fixed upper note).
+ * -> { reference, fixed: [spelled], target: spelled, chord: 'D major' | null,
+ *      heading: 'Major third above D4' | 'Fifth below A4' | 'D major' }
+ * (spelled = { name, pitchClass, letter, alter, octave, midi }, see tuning.spellInterval).
+ */
+export function spellTask(question) {
+  const task = getTask(question.taskKey);
+  const reference = rootName(question.rootFreq);
+  const down = question.motion === 'down';
+  const fixed = down
+    ? question.fixedTones.map(() => reference)
+    : question.fixedTones.map((t) => spellInterval(reference, t.intervalKey, 'up'));
+  const target = spellInterval(reference, question.target.intervalKey, down ? 'down' : 'up');
+  const chordKey = TASK_CHORDS[task.key] || null;
+  const chord = chordKey ? `${reference.pitchClass} ${CHORDS[chordKey].quality}` : null;
+  const heading = chord || `${task.label} ${down ? 'below' : 'above'} ${reference.name}`;
+  return { reference, fixed, target, chord, heading };
+}
+
+/**
+ * Deviation of a played / sung note from the question's target, in note direction (+ = higher):
+ * vs the CHOSEN tuning ('8 cents above pure' / 'below piano'; 'the target' when pure and piano
+ * coincide, e.g. the octave), plus `secondary` vs the other tuning when the two targets are more
+ * than 3 cents apart ('6 cents below piano'), else null.
+ * @returns {{deviation: {cents: number, text: string}, secondary: {cents: number, text: string}|null}}
+ */
+export function targetDeviation(question, freq) {
+  const iv = INTERVALS[question.target.intervalKey];
+  const gap = Math.abs(iv.equalCents - iv.justCents);
+  const word = (t) => (t === TUNINGS.JUST ? 'pure' : 'piano');
+  const chosen = question.tuning === TUNINGS.EQUAL ? TUNINGS.EQUAL : TUNINGS.JUST;
+  const other = chosen === TUNINGS.JUST ? TUNINGS.EQUAL : TUNINGS.JUST;
+  const freqOf = (t) => (t === TUNINGS.JUST ? question.target.justFreq : question.target.equalFreq);
+  const label = gap < 1 ? 'the target' : word(chosen);
+  const dev = deviation(centsBetween(freqOf(chosen), freq), `above ${label}`, `below ${label}`, 'in tune');
+  const secondary = gap > 3
+    ? deviation(centsBetween(freqOf(other), freq), `above ${word(other)}`, `below ${word(other)}`, 'in tune')
+    : null;
+  return { deviation: dev, secondary };
 }
 
 // ---------------------------------------------------------------------------

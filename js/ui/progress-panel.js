@@ -1,5 +1,5 @@
-// "Your progress" panel: rank, best result, a small per-day history chart, and the
-// tucked-away reset control. Used by every chapter.
+// "Your progress" panel: rank, finest difference / closest round, a small per-day history chart,
+// and the tucked-away reset control. Used by every exercise.
 
 import { el, setChildren, centsText, fmtCents } from './dom.js';
 import { icon } from './icons.js';
@@ -138,9 +138,9 @@ function historyChart(points, { caption, unit = 'cents' }) {
 }
 
 const BASIS_TEXT = {
-  threshold: 'Based on the smallest difference you reliably hear',
-  level: 'Based on your current difficulty level',
-  tuneError: 'Based on how far off your recent tunings were, on average',
+  threshold: (c) => `Based on the smallest difference you hear reliably: ${c}.`,
+  level: (c) => `Based on the difference you are working at: ${c}.`,
+  tuneError: (c) => `Based on your recent rounds: ${c} off on average.`,
 };
 
 function rankBlock(rank, noData) {
@@ -152,12 +152,12 @@ function rankBlock(rank, noData) {
   else if (rank.nextName && Number.isFinite(rank.nextAtCents)) next = `Next rank: ${rank.nextName}, at ${centsText(rank.nextAtCents)} or less.`;
   else if (!rank.nextName) next = 'You have reached the top rank. Wonderful ears!';
   const basis = !untried && BASIS_TEXT[rank.basis] && Number.isFinite(rank.measureCents)
-    ? `${BASIS_TEXT[rank.basis]}: ${centsText(rank.measureCents)}.`
+    ? BASIS_TEXT[rank.basis](centsText(rank.measureCents))
     : null;
   return el('div', { class: 'rank' },
     el('div', { class: 'rank-head' },
       el('span', { class: 'rank-label' }, 'Your rank'),
-      el('span', { class: 'rank-name' }, untried ? '—' : rank.name),
+      untried ? el('span', { class: 'rank-name', 'aria-label': 'no rank yet' }, '—') : el('span', { class: 'rank-name' }, rank.name),
     ),
     !untried && rank.description ? el('p', { class: 'rank-desc' }, rank.description) : null,
     next ? el('p', { class: 'rank-next' }, next) : null,
@@ -175,7 +175,7 @@ function rankBlock(rank, noData) {
 }
 
 const INSIGHT_GROUPS = [
-  ['byRegister', 'By register (how high or low)'],
+  ['byRegister', 'By range (high or low notes)'],
   ['byTone', 'By note in the chord'],
   ['byDirection', 'By direction'],
   ['byChord', 'By chord'],
@@ -183,26 +183,26 @@ const INSIGHT_GROUPS = [
 ];
 
 /** Direction keys from the logic -> words for singers. */
-const DIRECTION_WORDS = { sharp: 'Too high (sharp)', flat: 'Too low (flat)', same: 'Same', none: 'All in tune' };
+const DIRECTION_WORDS = { sharp: 'Too high', flat: 'Too low', same: 'Same', none: 'All in tune' };
 
-/** "Strengths & blind spots": small accuracy bars per group + the logic's sentences. */
+/** "Strengths and things to work on": small accuracy bars per group + the logic's sentences. */
 function insightsBlock(ins) {
-  const head = el('h3', { class: 'insights-title' }, 'Strengths & blind spots');
+  const head = el('h3', { class: 'insights-title' }, 'Strengths and things to work on');
   if (!ins) return null;
   const count = (g) => (Number.isFinite(g.answered) ? g.answered : Number.isFinite(g.attempts) ? g.attempts : 0);
   const groups = INSIGHT_GROUPS
     .map(([key, title]) => [title, Array.isArray(ins[key]) ? ins[key].filter((g) => g && count(g) > 0) : []])
     .filter(([, rows]) => rows.length);
   const strengths = Array.isArray(ins.strengths) ? ins.strengths : [];
-  const blind = Array.isArray(ins.blindSpots) ? ins.blindSpots : [];
+  const blind = Array.isArray(ins.toWorkOn) ? ins.toWorkOn : Array.isArray(ins.blindSpots) ? ins.blindSpots : [];
   if (!groups.length && !strengths.length && !blind.length) {
     return el('div', { class: 'insights' }, head,
-      el('p', { class: 'muted small' }, 'Not enough answers yet. After a few more rounds you will see where you are strong and where your blind spots are.'));
+      el('p', { class: 'muted small' }, "After a few more rounds, you'll see what you hear well and what to work on."));
   }
   return el('div', { class: 'insights' }, head,
     strengths.length || blind.length ? el('ul', { class: 'insight-notes' },
       strengths.map((s) => el('li', { class: 'is-strength' }, icon('circle-check', { size: 16 }), el('span', {}, s))),
-      blind.map((s) => el('li', { class: 'is-blind' }, icon('circle-help', { size: 16 }), el('span', {}, s))),
+      blind.map((s) => el('li', { class: 'is-blind' }, icon('circle-arrow-right', { size: 16 }), el('span', {}, s))),
     ) : null,
     el('div', { class: 'insight-groups' },
       groups.map(([title, rows]) => {
@@ -213,7 +213,7 @@ function insightsBlock(ins) {
         const maxCount = Math.max(1, ...rows.map(count));
         return el('div', { class: 'insight-group' },
           el('p', { class: 'insight-group-title' }, title,
-            isError ? el('span', { class: 'insight-hint' }, ' · average error, shorter is better') : null),
+            isError ? el('span', { class: 'insight-hint' }, ' · cents off on average — shorter is better') : null),
           el('ul', { class: 'acc-bars' }, rows.map((g) => {
             const label = DIRECTION_WORDS[g.label] || g.label;
             const n = count(g);
@@ -223,8 +223,8 @@ function insightsBlock(ins) {
             if (isError) {
               const e = Number.isFinite(g.avgAbsError) ? g.avgAbsError : 0;
               width = Math.round((e / maxError) * 100);
-              value = [centsText(e), el('span', { class: 'acc-count' }, ` · ${n} ${n === 1 ? 'try' : 'tries'}`)];
-              tip = `${label}: ${centsText(e)} off on average (${n} ${n === 1 ? 'try' : 'tries'})`;
+              value = [centsText(e), el('span', { class: 'acc-count' }, ` · ${n} ${n === 1 ? 'round' : 'rounds'}`)];
+              tip = `${label}: ${centsText(e)} off on average (${n} ${n === 1 ? 'round' : 'rounds'})`;
             } else if (isAccuracy) {
               const acc = Number.isFinite(g.accuracy) ? g.accuracy : n ? g.correct / n : 0;
               width = Math.round(Math.max(0, Math.min(1, acc)) * 100);
@@ -252,7 +252,7 @@ function insightsBlock(ins) {
  *             insights? (getInsights result, or null to hide the section) }
  * Returns { element, update() }.
  */
-export function createProgressPanel({ read, what = 'this chapter', onReset, title = 'Your progress', open = false }) {
+export function createProgressPanel({ read, what = 'this exercise', onReset, title = 'Your progress', open = false }) {
   const summaryRank = el('span', { class: 'progress-summary-rank' });
   const body = el('div', { class: 'progress-body' });
   const element = el('details', { class: 'help-box progress-panel', open: open || null },
@@ -287,7 +287,7 @@ export function createProgressPanel({ read, what = 'this chapter', onReset, titl
       el('div', { class: 'progress-grid' },
         rankBlock(data.rank, data.noData),
         el('div', { class: 'best' },
-          el('span', { class: 'rank-label' }, data.bestLabel || 'Best result'),
+          el('span', { class: 'rank-label' }, data.bestLabel || 'Finest difference'),
           el('span', { class: 'best-value' }, data.best != null && Number.isFinite(data.best) ? centsText(data.best) : '–'),
           data.bestNote ? el('span', { class: 'best-note' }, data.bestNote) : null,
         ),

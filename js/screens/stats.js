@@ -11,25 +11,20 @@ import { chapterProgressPanel, safeRank, safeInsights } from '../ui/chapter-prog
 import { createProgressPanel } from '../ui/progress-panel.js';
 import { loadSingModules } from '../ui/sing-common.js';
 import { shortTaskLabel } from '../ui/task-labels.js';
+import { createBackupControls, backupAvailable, downloadHref } from '../ui/backup.js';
 
 const APP_NAME = 'Choir Intonation Trainer';
 
 const SHORT_LABEL = {
   'higher-or-lower': 'Higher / lower',
   'odd-one-out': 'Odd one out',
-  'odd-or-in-tune': 'Odd one out · all in tune',
+  'odd-or-in-tune': 'Odd one out · sometimes all in tune',
   'tune-it': 'Lock it in',
   'sing-match': 'Echo',
   sing: 'Join the chord',
 };
 /** Chapters measured as an average error in cents (lower = better), not accuracy. */
 const ERROR_KEYS = ['tune-it', 'sing', 'sing-match'];
-const ROUTE_OF = {
-  'higher-or-lower': '#/higher-or-lower',
-  'odd-one-out': '#/odd-one-out',
-  'odd-or-in-tune': '#/odd-one-out',
-  'tune-it': '#/tune',
-};
 
 // Explicit colours for the downloaded image (mirrors the app's light / dark palettes).
 const PALETTES = {
@@ -125,14 +120,12 @@ function cardData(ov) {
       step: ranked ? c.rank.index + 1 : 0,
       of: (c.rank && c.rank.tierCount) || 6,
       best: Number.isFinite(c.bestCents) ? c.bestCents : null,
-      bestLabel: ERROR_KEYS.includes(c.key) ? 'best day' : 'best',
+      // "Finest: 65 cents" (listening: smallest difference heard) / "Best day: 6 cents off" (tuning, singing).
+      bestText: Number.isFinite(c.bestCents)
+        ? (ERROR_KEYS.includes(c.key) ? `Best day: ${centsText(c.bestCents)} off` : `Finest: ${centsText(c.bestCents)}`)
+        : null,
       answered: c.answered || 0,
-      unit: c.key === 'tune-it' ? 'tries' : ERROR_KEYS.includes(c.key) ? 'takes' : 'answers',
-      countText: (() => {
-        const n = c.answered || 0;
-        const [one, many] = c.key === 'tune-it' ? ['try', 'tries'] : ERROR_KEYS.includes(c.key) ? ['take', 'takes'] : ['answer', 'answers'];
-        return `${n} ${n === 1 ? one : many}`;
-      })(),
+      countText: `${c.answered || 0} ${(c.answered || 0) === 1 ? 'round' : 'rounds'}`,
     };
   });
   const tune = ov.chapters.find((c) => c.key === 'tune-it');
@@ -147,7 +140,8 @@ function cardData(ov) {
   const days = ov.totals.daysPractised || 0;
   const strength = ov.strengths && ov.strengths[0] ? ov.strengths[0].text
     : days > 0 ? `Showing up to practise: ${days} ${days === 1 ? 'day' : 'days'} so far.` : '';
-  const working = ov.blindSpots && ov.blindSpots[0] ? ov.blindSpots[0].text
+  const toWork = Array.isArray(ov.toWorkOn) ? ov.toWorkOn : ov.blindSpots;
+  const working = toWork && toWork[0] ? toWork[0].text
     : 'More insights appear after a few more rounds.';
   return {
     date: longDate(ov.date),
@@ -180,13 +174,12 @@ function shareCardHtml(d) {
       c.rankName
         ? [el('span', { class: 'share-rank' }, c.rankName),
           el('span', { class: 'share-tier' }, tierBar(c.step, c.of), `${c.step} of ${c.of}`)]
-        : el('span', { class: 'share-rank is-none' }, c.started ? 'Rank soon' : 'Not started'),
-      el('span', { class: 'share-best' },
-        c.best != null ? [el('strong', {}, centsText(c.best)), ` ${c.bestLabel}`] : ' '),
+        : el('span', { class: 'share-rank is-none' }, c.started ? 'No rank yet' : 'Not tried yet'),
+      el('span', { class: 'share-best' }, c.bestText || ' '),
       el('span', { class: 'share-count' }, c.started ? c.countText :' '),
     ))),
     el('div', { class: 'share-totals' },
-      el('div', {}, el('strong', {}, String(d.totals.answered || 0)), el('span', {}, 'answers & tries')),
+      el('div', {}, el('strong', {}, String(d.totals.answered || 0)), el('span', {}, 'rounds')),
       el('div', {}, el('strong', {}, String(d.totals.daysPractised || 0)), el('span', {}, 'days practised')),
       el('div', {}, el('strong', {}, String(d.totals.currentDailyStreak || 0)), el('span', {}, 'day streak')),
     ),
@@ -197,7 +190,7 @@ function shareCardHtml(d) {
     ) : null,
     el('ul', { class: 'share-lines' },
       d.strength ? el('li', {}, icon('circle-check', { size: 16 }), el('span', {}, el('strong', {}, 'Strength: '), d.strength)) : null,
-      d.working ? el('li', {}, icon('trending-up', { size: 16 }), el('span', {}, el('strong', {}, 'Working on: '), d.working)) : null,
+      d.working ? el('li', {}, icon('trending-up', { size: 16 }), el('span', {}, el('strong', {}, 'To work on: '), d.working)) : null,
     ),
   );
 }
@@ -256,16 +249,16 @@ function shareCardSvg(d, c) {
       for (let s = 0; s < ch.of; s += 1) rect(x + 12 + s * (segW + 3), y + 72, segW, 6, s < ch.step ? c.accent : c.border, { r: 3 });
       text(x + 12 + ch.of * (segW + 3) + 4, y + 79, `${ch.step} of ${ch.of}`, { size: 11, fill: c.muted });
     } else {
-      text(x + 12, y + 62, ch.started ? 'Rank soon' : 'Not started', { size: 16, weight: 600, fill: c.muted });
+      text(x + 12, y + 62, ch.started ? 'No rank yet' : 'Not tried yet', { size: 16, weight: 600, fill: c.muted });
     }
-    if (ch.best != null) text(x + 12, y + 102, `${centsText(ch.best)} ${ch.bestLabel}`, { size: 13, weight: 600 });
+    if (ch.bestText) text(x + 12, y + 102, ch.bestText, { size: 13, weight: 600 });
     if (ch.started) text(x + 12, y + 118, ch.countText, { size: 11, fill: c.muted });
   });
   y = y0 + Math.ceil(n / cols) * (th + gap) + 4;
 
   // Totals
   const totals = [
-    [d.totals.answered || 0, 'answers & tries'],
+    [d.totals.answered || 0, 'rounds'],
     [d.totals.daysPractised || 0, 'days practised'],
     [d.totals.currentDailyStreak || 0, 'day streak'],
   ];
@@ -294,7 +287,7 @@ function shareCardSvg(d, c) {
 
   // Strength / working on
   const lineMax = 96;
-  for (const [label, s, col] of [['Strength: ', d.strength, c.ok], ['Working on: ', d.working, c.warm]]) {
+  for (const [label, s, col] of [['Strength: ', d.strength, c.ok], ['To work on: ', d.working, c.warm]]) {
     if (!s) continue;
     const lines = wrap(label + s, lineMax);
     parts.push(`<circle cx="${pad + 5}" cy="${y + 10}" r="4" fill="${col}"/>`);
@@ -337,12 +330,6 @@ function svgToPng({ svg, width, height }, scale = 2) {
   });
 }
 
-function downloadHref(href, filename) {
-  const a = el('a', { href, download: filename });
-  document.body.append(a);
-  a.click();
-  a.remove();
-}
 
 // ---------------------------------------------------------------------------
 // Details per exercise
@@ -359,13 +346,13 @@ function errorPanel(key, title, getStatsFn) {
         rank: safeRank(key, stats),
         noData: !(stats.attempts > 0),
         best: bests.length ? Math.min(...bests) : null,
-        bestLabel: 'Closest tuning',
-        bestNote: bests.length ? 'Your most accurate try, in any task.' : 'Appears after your first try.',
-        caption: 'Average distance from in tune, per day (lower = better)',
+        bestLabel: 'Closest round',
+        bestNote: bests.length ? 'Your closest single round, in any task. Smaller is better.' : 'Appears after your first round.',
+        caption: 'Cents off per day (average) — lower is better',
         unit: 'cents',
         points: (stats.history || [])
           .filter((h) => h && h.avgAbsError != null)
-          .map((h) => ({ date: h.date, value: Number(h.avgAbsError), note: `${h.attempts} ${h.attempts === 1 ? 'try' : 'tries'}` })),
+          .map((h) => ({ date: h.date, value: Number(h.avgAbsError), note: `${h.attempts} ${h.attempts === 1 ? 'round' : 'rounds'}` })),
         empty: 'Play a few rounds to see your progress here.',
         insights: safeInsights(key),
       };
@@ -395,7 +382,7 @@ export default {
       const imageStatus = el('p', { class: 'small muted', role: 'status' });
       const themeSeg = segmented({
         name: 'stats-theme',
-        legend: 'Image colours',
+        legend: 'Image:',
         compact: true,
         options: [{ value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }],
         value: imageTheme,
@@ -412,86 +399,22 @@ export default {
             imageStatus.textContent = 'Image saved to your downloads.';
           } catch (err) {
             console.error(err);
-            imageStatus.textContent = 'Sorry — the image could not be made in this browser. A screenshot works too.';
+            imageStatus.textContent = "The image couldn't be made in this browser. Take a screenshot instead.";
           }
         },
       }, icon('download', { size: 18 }), 'Download as image');
 
-      // ---- Backup: export / import (secondary)
-      const backupArea = el('div', { class: 'backup-area' });
-      const backupStatus = el('p', { class: 'small', role: 'status' });
-      const fileInput = el('input', { type: 'file', accept: 'application/json,.json', class: 'visually-hidden', id: 'stats-import' });
-      const canExport = typeof progress.exportAllProgress === 'function';
-      const canImport = typeof progress.importAllProgress === 'function';
-
-      function showBackupButtons() {
-        setChildren(backupArea,
-          el('p', { class: 'small muted' }, 'Save all your progress and settings in a file — for example to move to another device — and load it again later.'),
-          el('div', { class: 'btn-row' },
-            canExport ? el('button', {
-              type: 'button',
-              class: 'btn btn-small',
-              onclick: () => {
-                try {
-                  const json = JSON.stringify(progress.exportAllProgress(), null, 2);
-                  const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
-                  downloadHref(url, `choir-intonation-progress-${localDate(new Date())}.json`);
-                  setTimeout(() => URL.revokeObjectURL(url), 2000);
-                  setStatus('Progress file saved to your downloads.', false);
-                } catch (err) {
-                  console.error(err);
-                  setStatus('Sorry — the file could not be saved.', true);
-                }
-              },
-            }, icon('download', { size: 16 }), 'Export data (JSON)') : null,
-            canImport ? el('button', { type: 'button', class: 'btn btn-small', onclick: () => fileInput.click() },
-              icon('upload', { size: 16 }), 'Import data') : null,
-          ),
-          fileInput,
-          backupStatus,
-        );
-      }
-      function setStatus(msg, isError) {
-        backupStatus.textContent = msg;
-        backupStatus.className = `small ${isError ? 'backup-error' : 'backup-ok'}`;
-      }
-      fileInput.addEventListener('change', async () => {
-        const file = fileInput.files && fileInput.files[0];
-        fileInput.value = '';
-        if (!file) return;
-        let parsed;
-        try {
-          parsed = JSON.parse(await file.text());
-        } catch {
-          setStatus('This file could not be read. Please choose a progress file exported from this app.', true);
-          return;
-        }
-        setChildren(backupArea,
-          el('p', { class: 'small confirm-text' }, `This will replace your current progress with "${file.name}" — continue?`),
-          el('div', { class: 'btn-row' },
-            el('button', {
-              type: 'button',
-              class: 'btn btn-small btn-danger',
-              onclick: () => {
-                const res = progress.importAllProgress(parsed);
-                if (res && res.ok) {
-                  build(); // redraw everything with the imported progress
-                  const s = container.querySelector('.backup-status-slot');
-                  if (s) s.textContent = 'Your progress has been imported.';
-                } else {
-                  showBackupButtons();
-                  setStatus((res && res.error) || 'This file could not be imported.', true);
-                }
-              },
-            }, 'Yes, replace'),
-            el('button', { type: 'button', class: 'btn btn-small', onclick: () => { showBackupButtons(); setStatus('Import cancelled.', false); } }, 'Cancel'),
-          ),
-        );
-      });
-      showBackupButtons();
-      const backup = (canExport || canImport) ? el('details', { class: 'help-box backup' },
-        el('summary', {}, icon('download', { size: 18 }), el('span', {}, 'Back up or move your progress'), icon('chevron-down', { size: 18, class: 'help-chevron' })),
-        el('div', { class: 'help-body' }, backupArea),
+      // ---- Backup (same controls as in Settings)
+      const backupCtl = backupAvailable() ? createBackupControls({
+        onImported: () => {
+          build(); // redraw everything with the loaded progress
+          const st = container.querySelector('.backup-status-slot');
+          if (st) st.textContent = 'Progress loaded from your backup.';
+        },
+      }) : null;
+      const backup = backupCtl ? el('details', { class: 'help-box backup' },
+        el('summary', {}, icon('download', { size: 18 }), el('span', {}, 'Backup'), icon('chevron-down', { size: 18, class: 'help-chevron' })),
+        el('div', { class: 'help-body' }, backupCtl.element),
       ) : null;
 
       // ---- Details per exercise
@@ -511,7 +434,7 @@ export default {
       const head = el('div', { class: 'screen-head' },
         el('div', {},
           el('h1', {}, 'Your stats'),
-          el('p', { class: 'task' }, hasData ? 'A snapshot of your progress — ready to share with your choir.' : 'Your progress will show up here.'),
+          el('p', { class: 'task' }, hasData ? 'A snapshot of your progress, ready to share with your choir.' : 'Your progress will show up here.'),
         ),
       );
 
@@ -528,12 +451,14 @@ export default {
         ]
         : [
           el('div', { class: 'card empty-stats' },
-            el('h2', {}, 'Play a few rounds to fill this page'),
-            el('p', { class: 'muted' }, 'Your ranks, best results and practice days appear here as soon as you have answered a few questions.'),
+            el('h2', {}, 'Nothing here yet'),
+            el('p', { class: 'muted' }, 'Play a few rounds in any exercise. Your ranks and practice days will appear here.'),
             el('div', { class: 'btn-row' },
-              el('a', { class: 'btn btn-primary', href: ROUTE_OF['higher-or-lower'] }, 'Higher / lower'),
-              el('a', { class: 'btn', href: ROUTE_OF['odd-one-out'] }, 'Odd one out'),
-              el('a', { class: 'btn', href: ROUTE_OF['tune-it'] }, 'Lock it in'),
+              el('a', { class: 'btn btn-primary', href: '#/higher-or-lower' }, 'Higher / lower'),
+              el('a', { class: 'btn', href: '#/odd-one-out' }, 'Odd one out'),
+              el('a', { class: 'btn', href: '#/tune' }, 'Lock it in'),
+              el('a', { class: 'btn', href: '#/sing-back' }, 'Echo'),
+              el('a', { class: 'btn', href: '#/sing' }, 'Join the chord'),
             ),
           ),
           slot,

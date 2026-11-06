@@ -11,6 +11,7 @@ export default {
       kind: 'match',
       title: 'Echo',
       task: 'Listen to the note, then sing it back and hold it steady.',
+      taskShort: 'Sing back a note you hear.',
     });
   },
 };

@@ -17,7 +17,7 @@
  * recordings and frame times share the playback clock.
  */
 
-import { getAudioContext } from './engine.js';
+import { getAudioContext, holdAudioContext, setAudioSessionType } from './engine.js';
 
 // ---------------------------------------------------------------------------
 // FFT (iterative radix-2, complex, in place) with cached tables
@@ -416,12 +416,13 @@ export async function startAnalysis(sourceNode, { onFrame, frameMs = 20, minFreq
       recording = null;
       if (!rec.length) return null;
       const buf = ac.createBuffer(1, rec.length, sr);
-      const out = buf.getChannelData(0);
+      const out = new Float32Array(rec.length);
       let o = 0;
       for (const c of rec.chunks) {
         out.set(c, o);
         o += c.length;
       }
+      buf.copyToChannel(out, 0); // write-only (no read-back that privacy shields could alter)
       handle.recordingStartTime = rec.startTime;
       return buf;
     },
@@ -561,10 +562,16 @@ export async function startAnalysis(sourceNode, { onFrame, frameMs = 20, minFreq
  * for the device to start, so the first moment of a take opened on press may
  * be lost: for hold-to-sing either keep the stream open for the screen visit,
  * or open it on the first press and keep it open afterwards.
- * @param {{onFrame?: (f: MicFrame) => void, frameMs?: number, active?: boolean}} [opts]
+ * Microphone lost (track ended by the system, headset unplugged, device
+ * removed): the handle stops itself cleanly (stop() stays safe to call) and
+ * onEnded({ reason: 'ended' | 'device-lost', message }) fires once; register
+ * it as an option or later with handle.onEnded(cb) (returns unsubscribe).
+ * handle.ended is true afterwards. Reconnect = call startMic again.
+ * @param {{onFrame?: (f: MicFrame) => void, frameMs?: number, active?: boolean,
+ *          onEnded?: (e: {reason: string, message: string}) => void}} [opts]
  * @returns {Promise<MicHandle>}
  */
-export async function startMic({ onFrame, frameMs = 20, active = true } = {}) {
+export async function startMic({ onFrame, frameMs = 20, active = true, onEnded } = {}) {
   if (!micSupported()) {
     const insecure = globalThis.isSecureContext === false;
     throw micError(
@@ -574,14 +581,23 @@ export async function startMic({ onFrame, frameMs = 20, active = true } = {}) {
         : 'This browser cannot use the microphone. Try an up-to-date Chrome, Edge, Firefox or Safari.',
     );
   }
+  // Keep the engine's context (no recreation for a new buffer size) while the
+  // microphone uses it, and on iOS switch the audio session to play-and-record.
+  const release = holdAudioContext();
+  const fail = (e) => {
+    release();
+    setAudioSessionType('playback');
+    return mapMicError(e);
+  };
   let ac;
   try {
     ac = getAudioContext();
     if (ac.state !== 'running') await ac.resume();
   } catch (e) {
-    throw mapMicError(e);
+    throw fail(e);
   }
 
+  setAudioSessionType('play-and-record');
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
@@ -594,7 +610,7 @@ export async function startMic({ onFrame, frameMs = 20, active = true } = {}) {
       video: false,
     });
   } catch (e) {
-    throw mapMicError(e);
+    throw fail(e);
   }
 
   const releaseTracks = () => {
@@ -610,14 +626,71 @@ export async function startMic({ onFrame, frameMs = 20, active = true } = {}) {
     analysis = await startAnalysis(source, { onFrame, frameMs, active });
   } catch (e) {
     releaseTracks();
-    throw mapMicError(e);
+    throw fail(e);
   }
 
   const innerStop = analysis.stop;
+  const track = stream.getAudioTracks()[0] || null;
+  const md = navigator.mediaDevices;
+  let stoppedMic = false;
+  let ended = false;
+  const endedCallbacks = new Set();
+  if (typeof onEnded === 'function') endedCallbacks.add(onEnded);
+
+  const onTrackEnded = () => micLost('ended');
+  const onDeviceChange = () => {
+    if (stoppedMic || ended || !md || typeof md.enumerateDevices !== 'function') return;
+    if (track && track.readyState === 'ended') {
+      micLost('ended');
+      return;
+    }
+    let id = null;
+    try { id = track && track.getSettings ? track.getSettings().deviceId : null; } catch (e) { /* ignore */ }
+    if (!id) return; // cannot tell; a lost device also ends the track
+    md.enumerateDevices().then((list) => {
+      const present = list.some((d) => d.kind === 'audioinput' && d.deviceId === id);
+      if (!present) micLost('device-lost');
+    }, () => {});
+  };
+
+  /** The microphone went away by itself: stop cleanly, then tell the screen (once). */
+  function micLost(reason) {
+    if (stoppedMic || ended) return;
+    ended = true;
+    analysis.ended = true;
+    analysis.stop();
+    const info = {
+      reason,
+      message: 'The microphone stopped (was a headset unplugged?). Try reconnecting it.',
+    };
+    for (const cb of Array.from(endedCallbacks)) {
+      try {
+        cb(info);
+      } catch (e) {
+        console.error('[pitch] onEnded callback threw:', e);
+      }
+    }
+  }
+
+  if (track) track.addEventListener('ended', onTrackEnded);
+  if (md && typeof md.addEventListener === 'function') md.addEventListener('devicechange', onDeviceChange);
+
+  analysis.ended = false;
+  analysis.onEnded = (cb) => {
+    if (typeof cb !== 'function') return () => {};
+    endedCallbacks.add(cb);
+    return () => endedCallbacks.delete(cb);
+  };
   analysis.stop = () => {
+    if (stoppedMic) return; // safe to call again (also after onEnded)
+    stoppedMic = true;
     innerStop();
     try { source.disconnect(); } catch (e) { /* ignore */ }
+    if (track) track.removeEventListener('ended', onTrackEnded);
+    if (md && typeof md.removeEventListener === 'function') md.removeEventListener('devicechange', onDeviceChange);
     releaseTracks(); // turns the browser's microphone indicator off
+    release();
+    setAudioSessionType('playback');
   };
   return analysis;
 }

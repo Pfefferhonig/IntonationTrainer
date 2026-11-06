@@ -7,8 +7,8 @@ export const TUNINGS = { JUST: 'just', EQUAL: 'equal' };
 
 /** Human-readable labels for each tuning system. */
 export const TUNING_LABELS = {
-  just: 'Just intonation (pure, choir)',
-  equal: 'Equal temperament (piano)',
+  just: 'Pure (choir tuning)',
+  equal: 'Piano (equal steps)',
 };
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -60,17 +60,18 @@ export function noteName(midi) {
 /**
  * Nearest piano note of a frequency and the offset from it.
  * describeFreq(224) -> { name: 'A3', midi: 57, cents: 31.1, text: 'A3 +31' }.
- * cents is rounded to 0.1; text rounds to whole cents and uses a true minus sign ('D4 −8');
- * a note within half a cent of the piano key is just its name ('A4').
+ * cents is rounded to 0.1; text uses the roundCents rule (whole from 10 cents, one decimal
+ * below: 'D4 −8.2', 'A3 +12') and a true minus sign; an offset that rounds to 0 shows just the
+ * name ('A4').
  * @param {number} freq @returns {{name: string, midi: number, cents: number, text: string}}
  */
 export function describeFreq(freq) {
   const exact = freqToMidi(freq);
   const midi = Math.round(exact);
   const cents = Math.round((exact - midi) * 1000) / 10;
-  const whole = Math.round(cents);
+  const shown = roundCents((exact - midi) * 100);
   const name = noteName(midi);
-  const text = whole === 0 ? name : `${name} ${whole > 0 ? '+' : '−'}${Math.abs(whole)}`;
+  const text = shown === 0 ? name : `${name} ${shown > 0 ? '+' : '−'}${Math.abs(shown)}`;
   return { name, midi, cents: cents === 0 ? 0 : cents, text };
 }
 
@@ -87,12 +88,25 @@ export function registerBand(midi) {
 }
 
 /**
- * Plain-language size in cents, rounded to 0.1, sign dropped: 12 -> "12 cents",
- * 1 -> "1 cent", 3.46 -> "3.5 cents", -5 -> "5 cents".
+ * The one rounding rule for showing cents: whole numbers from 10 cents up, one decimal below 10
+ * (".0" never shown by JavaScript anyway). Keeps the sign: roundCents(-86.14) -> -86,
+ * roundCents(3.46) -> 3.5, roundCents(9.96) -> 10. For UI code that formats numbers itself.
+ * @param {number} cents @returns {number}
+ */
+export function roundCents(cents) {
+  const a = Math.abs(cents);
+  const tenth = Math.round(a * 10) / 10;
+  const r = tenth >= 10 ? Math.round(a) : tenth;
+  return r === 0 ? 0 : Math.sign(cents) * r;
+}
+
+/**
+ * Plain-language size in cents with the roundCents rule, sign dropped: 86.1 -> "86 cents",
+ * 3.46 -> "3.5 cents", 1 -> "1 cent", -5 -> "5 cents". Every user-visible message uses this.
  * @param {number} cents @returns {string}
  */
 export function formatCents(cents) {
-  const v = Math.round(Math.abs(cents) * 10) / 10;
+  const v = Math.abs(roundCents(cents));
   return `${v} ${v === 1 ? 'cent' : 'cents'}`;
 }
 
@@ -215,7 +229,7 @@ export const CHORDS = Object.freeze(
 );
 
 /**
- * Plain chord name from the root's nearest note: chordName(293.7, 'major') -> 'D major',
+ * Plain chord name from the root's nearest note, in key spelling (KEY_NAMES): chordName(293.7, 'major') -> 'D major',
  * chordName(196, 'dom7') -> 'G dominant 7th'.
  * @param {number} rootFreq @param {string} chordKey @returns {string}
  */
@@ -223,7 +237,122 @@ export function chordName(rootFreq, chordKey) {
   const chord = lookup(CHORDS, chordKey);
   if (!chord) throw new Error(`Unknown chord key: "${chordKey}"`);
   const m = Math.round(freqToMidi(rootFreq));
-  return `${NOTE_NAMES[((m % 12) + 12) % 12]} ${chord.quality}`;
+  return `${KEY_NAMES[((m % 12) + 12) % 12]} ${chord.quality}`;
+}
+
+// ---------------------------------------------------------------------------
+// Note spelling (names for the key, not the piano grid)
+// ---------------------------------------------------------------------------
+
+/**
+ * Conventional key spelling of the 12 pitch classes (C = 0), used for roots and keys:
+ * C, D♭, D, E♭, E, F, F♯, G, A♭, A, B♭, B.
+ */
+export const KEY_NAMES = Object.freeze(['C', 'D♭', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B']);
+
+const LETTERS = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
+const LETTER_SEMITONES = [0, 2, 4, 5, 7, 9, 11];
+const ACCIDENTALS = { '-2': '𝄫', '-1': '♭', 0: '', 1: '♯', 2: '𝄪' };
+/** Letter steps of each interval: a second is 1 letter, a third 2, ...; the tritone is an augmented fourth (3). */
+const INTERVAL_LETTER_STEPS = { P1: 0, m2: 1, M2: 1, m3: 2, M3: 2, P4: 3, TT: 3, P5: 4, m6: 5, M6: 5, m7: 6, M7: 6, h7: 6, P8: 7 };
+
+/** A spelled note: { name: 'B♭3', pitchClass: 'B♭', letter: 'B', alter: -1, octave: 3, midi: 58 }. */
+function makeSpelled(letterIndex, alter, octave) {
+  const letter = LETTERS[letterIndex];
+  const acc = ACCIDENTALS[alter];
+  if (acc === undefined) throw new Error(`Cannot spell a note with ${alter} accidentals`);
+  const pitchClass = letter + acc;
+  return { name: pitchClass + octave, pitchClass, letter, alter, octave, midi: (octave + 1) * 12 + LETTER_SEMITONES[letterIndex] + alter };
+}
+
+/**
+ * Root / key note of a frequency: its nearest pitch class in key spelling (KEY_NAMES), octave in
+ * scientific pitch (60 = C4). Random non-grid pitches are named by the nearest key, without any
+ * piano offset: rootName(233.1) -> { name: 'B♭3', pitchClass: 'B♭', letter: 'B', alter: -1,
+ * octave: 3, midi: 58 }.
+ * @param {number} freq
+ * @returns {{name: string, pitchClass: string, letter: string, alter: number, octave: number, midi: number}}
+ */
+export function rootName(freq) {
+  const midi = Math.round(freqToMidi(freq));
+  const pc = ((midi % 12) + 12) % 12;
+  const letterIndex = LETTERS.indexOf(KEY_NAMES[pc][0]);
+  return makeSpelled(letterIndex, pc - LETTER_SEMITONES[letterIndex], Math.floor(midi / 12) - 1);
+}
+
+/**
+ * Parse a note name such as 'B♭3', 'Bb3', 'F♯4', 'F#4', 'C4', 'E𝄫5', 'Fx4' into a spelled note.
+ * @param {string} name @returns {object} spelled note (see rootName)
+ */
+export function parseNoteName(name) {
+  const m = /^([A-Ga-g])(𝄪|𝄫|##|bb|x|[♯#♭b]?)(-?\d+)$/.exec(String(name).trim());
+  if (!m) throw new Error(`Not a note name: "${name}"`);
+  const alter = { '': 0, '♯': 1, '#': 1, '♭': -1, b: -1, '##': 2, x: 2, '𝄪': 2, bb: -2, '𝄫': -2 }[m[2]];
+  return makeSpelled(LETTERS.indexOf(m[1].toUpperCase()), alter, Number(m[3]));
+}
+
+/**
+ * Spell the note an interval above (or below) a root, by interval: the letter moves by the
+ * interval's number (second = 1 letter, third = 2, fourth = 3, fifth = 4, sixth = 5, seventh = 6,
+ * octave = 7; the tritone is an augmented fourth) and the accidental makes the size exact.
+ * Octave numbers follow the letter (scientific pitch: C♭4 = B3's key, B♯3 = C4's key).
+ * spellInterval('G3', 'm7').name -> 'F4'; spellInterval('B♭3', 'm7').name -> 'A♭4';
+ * spellInterval('C4', 'TT').name -> 'F♯4'; spellInterval('E4', 'M3', 'down').name -> 'C4'.
+ * Double sharps/flats appear only when the interval demands them (a minor second above A♭ is B𝄫).
+ * @param {string|object} root note name or spelled note (rootName / parseNoteName / spellInterval)
+ * @param {string} intervalKey @param {'up'|'down'} [direction='up']
+ * @returns {{name: string, pitchClass: string, letter: string, alter: number, octave: number, midi: number}}
+ */
+export function spellInterval(root, intervalKey, direction = 'up') {
+  const r = typeof root === 'string' ? parseNoteName(root) : root;
+  if (!r || !LETTERS.includes(r.letter)) throw new Error('spellInterval: root must be a note name or a spelled note');
+  const iv = getInterval(intervalKey);
+  const steps = INTERVAL_LETTER_STEPS[intervalKey];
+  if (steps === undefined) throw new Error(`spellInterval: no spelling for "${intervalKey}"`);
+  const sign = direction === 'down' ? -1 : 1;
+  const targetIndex = LETTERS.indexOf(r.letter) + r.octave * 7 + sign * steps;
+  const letterIndex = ((targetIndex % 7) + 7) % 7;
+  const octave = Math.floor(targetIndex / 7);
+  const targetMidi = r.midi + sign * iv.semitones;
+  return makeSpelled(letterIndex, targetMidi - ((octave + 1) * 12 + LETTER_SEMITONES[letterIndex]), octave);
+}
+
+/** The same spelled note, `shift` octaves up (+) or down (-). */
+export function shiftOctave(spelled, shift) {
+  return makeSpelled(LETTERS.indexOf(spelled.letter), spelled.alter, spelled.octave + shift);
+}
+
+/**
+ * Plain size of a pitch difference compared with a semitone, for |cents| >= 20 when it is close
+ * to a simple fraction: 56 -> 'about half a semitone', 26 -> 'about a quarter of a semitone';
+ * null otherwise.
+ * @param {number} cents @returns {string|null}
+ */
+export function semitoneFraction(cents) {
+  const c = Math.abs(cents);
+  if (c < 20) return null;
+  const options = [[25, 'a quarter of a semitone'], [100 / 3, 'a third of a semitone'], [50, 'half a semitone'],
+    [200 / 3, 'two thirds of a semitone'], [75, 'three quarters of a semitone'], [100, 'a semitone']];
+  let best = null;
+  for (const [v, text] of options) {
+    if (Math.abs(c - v) <= 8 && (!best || Math.abs(c - v) < Math.abs(c - best[0]))) best = [v, text];
+  }
+  return best ? `about ${best[1]}` : null;
+}
+
+/**
+ * Plain deviation of a note from its target, using the one cents rule:
+ * deviation(35, 'too high', 'too low') -> { cents: 35, text: '35 cents too high' };
+ * deviation(-8, 'above pure', 'below pure') -> { cents: -8, text: '8 cents below pure' };
+ * rounds to 0 -> { cents: 0, text: onTarget } (default 'in tune').
+ * @param {number} cents signed (+ = higher) @param {string} upWords @param {string} downWords
+ * @param {string} [onTarget='in tune']
+ * @returns {{cents: number, text: string}}
+ */
+export function deviation(cents, upWords, downWords, onTarget = 'in tune') {
+  const c = roundCents(cents);
+  if (c === 0) return { cents: 0, text: onTarget };
+  return { cents: c, text: `${formatCents(c)} ${c > 0 ? upWords : downWords}` };
 }
 
 /**
@@ -297,15 +426,41 @@ export const VOICE_PARTS = Object.freeze(
   Object.fromEntries(VOICE_PART_DEFS.map((v) => [v.key, Object.freeze({ ...v })]))
 );
 
+/** The real voice parts, in display order (soprano -> bass). 'any' is only the fallback. */
+const REAL_PARTS = ['soprano', 'alto', 'tenor', 'bass'];
+
+/**
+ * Clean a voice-part selection: unknown keys dropped, duplicates removed, order soprano -> bass,
+ * and 'any' removed when at least one real part is present. Only 'any' -> ['any']; nothing
+ * valid -> [] (voiceRange then falls back to 'any').
+ * @param {string|string[]} list @returns {string[]}
+ */
+export function cleanVoiceParts(list) {
+  const keys = Array.isArray(list) ? list : typeof list === 'string' ? [list] : [];
+  const real = REAL_PARTS.filter((k) => keys.includes(k));
+  if (real.length) return real;
+  return keys.includes('any') ? ['any'] : [];
+}
+
+/**
+ * True when the selection contains at least one real voice part (soprano/alto/tenor/bass);
+ * false for nothing, only 'any', or only unknown keys (the user has not picked yet).
+ * @param {string|string[]} voiceParts @returns {boolean}
+ */
+export function isVoiceChosen(voiceParts) {
+  return cleanVoiceParts(voiceParts).some((k) => k !== 'any');
+}
+
 /**
  * Range covered by one voice part or several (the union: lowest low .. highest high).
- * Accepts a key or an array of keys; unknown keys are ignored; nothing valid -> 'any'.
- * label: the part's label, or several joined in table order ('Alto + Tenor').
+ * Accepts a key or an array of keys, cleaned with cleanVoiceParts ('any' is ignored next to a
+ * real part); nothing valid -> 'any' (the fallback for users who have not picked a part yet).
+ * label: the part's label, or several joined soprano -> bass ('Alto + Tenor').
  * @param {string|string[]} voiceParts
  * @returns {{lowMidi: number, highMidi: number, label: string}}
  */
 export function voiceRange(voiceParts) {
-  const keys = Array.isArray(voiceParts) ? voiceParts : [voiceParts];
+  const keys = cleanVoiceParts(voiceParts);
   const parts = VOICE_PART_DEFS.filter((v) => keys.includes(v.key));
   if (parts.length === 0) parts.push(VOICE_PARTS.any);
   return {

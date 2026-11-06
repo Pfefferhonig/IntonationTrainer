@@ -13,7 +13,7 @@
 // Version-1 tune-it data (no recentSigned / log) loads fine.
 
 import { getProgress, saveProgress } from '../storage.js';
-import { registerBand } from '../music/tuning.js';
+import { registerBand, formatCents } from '../music/tuning.js';
 
 /** Attempts needed in a register band before perTask.byRegister reports it. */
 export const REGISTER_MIN_ATTEMPTS = 5;
@@ -23,6 +23,9 @@ export const INSIGHT_MIN_ATTEMPTS = 8;
 export const TENDENCY_MIN_CENTS = 4;
 /** Errors above this count as "too high/low" in byDirection (= the 'excellent' limit). */
 const DIRECTION_MIN_CENTS = 3;
+
+/** Results more than this many cents off count as a miss (below "close"). */
+export const CLOSE_LIMIT_CENTS = 15;
 
 const RECENT_PER_TASK = 10;
 const RECENT_OVERALL = 20;
@@ -41,15 +44,12 @@ const finite = (x) => typeof x === 'number' && Number.isFinite(x);
 const round1 = (x) => Math.round(x * 10) / 10;
 const mean = (xs) => (xs.length ? round1(xs.reduce((a, b) => a + b, 0) / xs.length) : null);
 const own = (o, k) => o !== null && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
-const centsText = (c) => {
-  const v = Math.round(Math.abs(c));
-  return `${v} ${v === 1 ? 'cent' : 'cents'}`;
-};
+const centsText = formatCents; // the one rule for showing cents (tuning.js)
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 const WORDS = {
-  tune: { verb: 'tune', inTune: 'tune', wellIn: 'You tune especially well in the' },
-  sing: { verb: 'sing', inTune: 'sing in tune', wellIn: 'You sing especially accurately in the' },
+  tune: { verb: 'tune', inTune: 'tune' },
+  sing: { verb: 'sing', inTune: 'sing in tune' },
 };
 
 /**
@@ -73,6 +73,7 @@ export function createErrorStore({ key, tasks, steadiness = false, verb = 'tune'
         recent: Array.isArray(s.recent) ? s.recent.filter(nonNeg).slice(-RECENT_PER_TASK) : [],
         recentSigned: Array.isArray(s.recentSigned) ? s.recentSigned.filter(finite).slice(-RECENT_PER_TASK) : [],
         bestAbsError: nonNeg(s.bestAbsError) ? s.bestAbsError : null,
+        missStreak: count(s.missStreak),
       };
       if (steadiness) {
         perTask[k].recentSteadiness = Array.isArray(s.recentSteadiness) ? s.recentSteadiness.filter(nonNeg).slice(-RECENT_PER_TASK) : [];
@@ -82,6 +83,7 @@ export function createErrorStore({ key, tasks, steadiness = false, verb = 'tune'
     return {
       version: 2,
       attempts: count(d.attempts),
+      missStreak: count(d.missStreak),
       recent: Array.isArray(d.recent) ? d.recent.filter(nonNeg).slice(-RECENT_OVERALL) : [],
       perTask,
       log: Array.isArray(d.log)
@@ -126,11 +128,13 @@ export function createErrorStore({ key, tasks, steadiness = false, verb = 'tune'
         bestAbsError: s.bestAbsError,
         meanSignedError: mean(s.recentSigned),
         byRegister: registerGroups(d.log.filter((x) => x.k === k), REGISTER_MIN_ATTEMPTS),
+        missStreak: s.missStreak,
       };
       if (steadiness) perTask[k].steadinessCents = mean(s.recentSteadiness);
     }
     const out = {
       attempts: d.attempts,
+      missStreak: d.missStreak,
       recentAvgAbsError: mean(d.recent),
       perTask,
       history: d.history.map((h) => ({ ...h, avgAbsError: h.avgAbsError === null ? null : round1(h.avgAbsError) })),
@@ -157,6 +161,10 @@ export function createErrorStore({ key, tasks, steadiness = false, verb = 'tune'
     s.recent = [...s.recent, e].slice(-RECENT_PER_TASK);
     if (signed !== null) s.recentSigned = [...s.recentSigned, signed].slice(-RECENT_PER_TASK);
     if (s.bestAbsError === null || e < s.bestAbsError) s.bestAbsError = e;
+    // a "miss" = below close (more than CLOSE_LIMIT_CENTS off, or result.level 'keep-going')
+    const miss = result.level ? result.level === 'keep-going' : err > CLOSE_LIMIT_CENTS + 1e-9;
+    s.missStreak = miss ? s.missStreak + 1 : 0;
+    d.missStreak = miss ? d.missStreak + 1 : 0;
     if (steadiness && steady !== null) s.recentSteadiness = [...s.recentSteadiness, steady].slice(-RECENT_PER_TASK);
     const entry = { k: taskKey, e, s: signed, m: midi, o: result.motion === 'down' ? 'down' : 'up' };
     if (steadiness) entry.v = steady;
@@ -203,7 +211,7 @@ export function createErrorStore({ key, tasks, steadiness = false, verb = 'tune'
       byTask.push(item);
       if (item.meanSignedError !== null && Math.abs(item.meanSignedError) >= TENDENCY_MIN_CENTS) {
         const up = item.meanSignedError > 0;
-        blindSpots.push(`You tend to ${words.verb} ${phraseOf(t)} ${up ? 'sharp' : 'flat'}: on average ${centsText(item.meanSignedError)} too ${up ? 'high' : 'low'}.`);
+        blindSpots.push(`You tend to ${words.verb} ${phraseOf(t)} too ${up ? 'high' : 'low'}: ${centsText(item.meanSignedError)} on average.`);
       }
     }
     if (byTask.length >= 2) {
@@ -213,9 +221,9 @@ export function createErrorStore({ key, tasks, steadiness = false, verb = 'tune'
         const rest = others.reduce((a, x) => a + x.e, 0) / others.length;
         const name = phraseOf(tasks.find((t) => t.key === item.key));
         if (item.avgAbsError <= rest * 0.6 && rest - item.avgAbsError >= 3) {
-          strengths.push(`You ${words.verb} ${name} especially accurately (${centsText(item.avgAbsError)} off on average, vs ${centsText(rest)} for the other tasks).`);
+          strengths.push(`You ${words.verb} ${name} especially well: ${centsText(item.avgAbsError)} off on average (other tasks: ${centsText(rest)}).`);
         } else if (item.avgAbsError >= rest * 1.6 && item.avgAbsError - rest >= 4) {
-          blindSpots.push(`${cap(name)} is your hardest task (${centsText(item.avgAbsError)} off on average, vs ${centsText(rest)} for the other tasks).`);
+          blindSpots.push(`${cap(name)} is your hardest task: ${centsText(item.avgAbsError)} off on average (other tasks: ${centsText(rest)}).`);
         }
       }
     }
@@ -227,9 +235,9 @@ export function createErrorStore({ key, tasks, steadiness = false, verb = 'tune'
         if (others.length < INSIGHT_MIN_ATTEMPTS) continue;
         const rest = others.reduce((a, x) => a + x.e, 0) / others.length;
         if (g.avgAbsError >= rest * 1.5 && g.avgAbsError - rest >= 4) {
-          blindSpots.push(`Notes in the ${g.label} range are harder for you to ${words.inTune} (${centsText(g.avgAbsError)} off on average, vs ${centsText(rest)} elsewhere).`);
+          blindSpots.push(`Notes in the ${g.label} range are harder for you to ${words.inTune}: ${centsText(g.avgAbsError)} off on average (elsewhere: ${centsText(rest)}).`);
         } else if (g.avgAbsError <= rest * 0.66 && rest - g.avgAbsError >= 3) {
-          strengths.push(`${words.wellIn} ${g.label} range (${centsText(g.avgAbsError)} off on average, vs ${centsText(rest)} elsewhere).`);
+          strengths.push(`You ${words.verb} especially well in the ${g.label} range: ${centsText(g.avgAbsError)} off on average (elsewhere: ${centsText(rest)}).`);
         }
       }
     }
@@ -237,8 +245,8 @@ export function createErrorStore({ key, tasks, steadiness = false, verb = 'tune'
     const sharp = log.filter((x) => x.s !== null && x.s > DIRECTION_MIN_CENTS).length;
     const flat = log.filter((x) => x.s !== null && x.s < -DIRECTION_MIN_CENTS).length;
     const byDirection = [
-      { key: 'sharp', label: 'Ended too high (sharp)', answered: sharp },
-      { key: 'flat', label: 'Ended too low (flat)', answered: flat },
+      { key: 'sharp', label: 'Ended too high', answered: sharp },
+      { key: 'flat', label: 'Ended too low', answered: flat },
     ].filter((g) => g.answered >= INSIGHT_MIN_ATTEMPTS);
 
     // Ascending vs descending, interval tasks only, compared task by task.
@@ -257,9 +265,9 @@ export function createErrorStore({ key, tasks, steadiness = false, verb = 'tune'
     if (motionCmp) {
       const { downMean, upMean } = motionCmp;
       if (downMean >= upMean * 1.5 && downMean - upMean >= 3) {
-        blindSpots.push(`Descending intervals are harder for you to ${words.inTune} (${centsText(downMean)} off on average, vs ${centsText(upMean)} going up, on the same intervals).`);
+        blindSpots.push(`Descending intervals are harder for you to ${words.inTune}: ${centsText(downMean)} off on average (going up: ${centsText(upMean)}, same intervals).`);
       } else if (upMean >= downMean * 1.5 && upMean - downMean >= 3) {
-        strengths.push(`You ${words.verb} descending intervals especially well (${centsText(downMean)} off on average, vs ${centsText(upMean)} going up, on the same intervals).`);
+        strengths.push(`You ${words.verb} descending intervals especially well: ${centsText(downMean)} off on average (going up: ${centsText(upMean)}, same intervals).`);
       }
     }
 
@@ -271,6 +279,7 @@ export function createErrorStore({ key, tasks, steadiness = false, verb = 'tune'
       byDirection,
       byMotion,
       strengths,
+      toWorkOn: blindSpots, // UX wording ("Strengths and things to work on"); blindSpots kept as the old name
       blindSpots,
     };
 
@@ -279,7 +288,7 @@ export function createErrorStore({ key, tasks, steadiness = false, verb = 'tune'
       result.steadinessCents = vs.length ? mean(vs) : null;
       if (vs.length >= INSIGHT_MIN_ATTEMPTS) {
         const avg = vs.reduce((a, b) => a + b, 0) / vs.length;
-        if (avg >= 15) blindSpots.push(`Your held notes wobble (±${centsText(avg)} on average) — a straighter tone makes it easier to sing in tune.`);
+        if (avg >= 15) blindSpots.push(`Your held notes wobble (±${centsText(avg)} on average). A straighter tone makes it easier to sing in tune.`);
         else if (avg <= 6) strengths.push(`You hold notes very steadily (±${centsText(avg)} on average).`);
       }
     }
@@ -301,6 +310,15 @@ export function createErrorStore({ key, tasks, steadiness = false, verb = 'tune'
     }
     if (!w || nUp < INSIGHT_MIN_ATTEMPTS || nDown < INSIGHT_MIN_ATTEMPTS) return null;
     return { upMean: up / w, downMean: down / w };
+  }
+
+  /** Reset the miss streak (overall and for taskKey, if given), e.g. after "Make it easier". */
+  function resetMissStreak(taskKey) {
+    if (getProgress(key) === null) return;
+    const d = load();
+    d.missStreak = 0;
+    if (taskKey && d.perTask[taskKey]) d.perTask[taskKey].missStreak = 0;
+    saveProgress(key, d);
   }
 
   /** Clean saved data, or null if nothing was ever saved (for export). */
@@ -325,18 +343,20 @@ export function createErrorStore({ key, tasks, steadiness = false, verb = 'tune'
       return x;
     };
     if (!isObj(d)) fail(`${where} is damaged.`);
-    keysOnly(d, ['version', 'attempts', 'recent', 'perTask', 'log', 'history'], where);
+    keysOnly(d, ['version', 'attempts', 'missStreak', 'recent', 'perTask', 'log', 'history'], where);
+    if (d.missStreak !== undefined && !isInt(d.missStreak, 0, d.attempts)) fail(`${where}: the totals are damaged.`);
     if (d.version !== 2) fail(`${where} has an unknown format.`);
     if (!isInt(d.attempts)) fail(`${where}: the totals are damaged.`);
     for (const e of arr(d.recent, RECENT_OVERALL, `${where}: the recent results`)) if (!err(e)) fail(`${where}: a result is out of range.`);
     if (!isObj(d.perTask)) fail(`${where}: the per-task results are damaged.`);
     keysOnly(d.perTask, taskKeys, `${where}: the per-task results`);
-    const perTaskKeys = ['attempts', 'recent', 'recentSigned', 'bestAbsError', ...(steadiness ? ['recentSteadiness'] : [])];
+    const perTaskKeys = ['attempts', 'recent', 'recentSigned', 'bestAbsError', 'missStreak', ...(steadiness ? ['recentSteadiness'] : [])];
     for (const [k, s] of Object.entries(d.perTask)) {
       const w = `${where}: the results for "${k}"`;
       if (!isObj(s)) fail(`${w} are damaged.`);
       keysOnly(s, perTaskKeys, w);
-      if (!isInt(s.attempts, 0, d.attempts) || !(s.bestAbsError === null || err(s.bestAbsError))) fail(`${w} are damaged.`);
+      if (!isInt(s.attempts, 0, d.attempts) || !(s.bestAbsError === null || err(s.bestAbsError)) ||
+          !(s.missStreak === undefined || isInt(s.missStreak, 0, s.attempts))) fail(`${w} are damaged.`);
       for (const e of arr(s.recent, RECENT_PER_TASK, w)) if (!err(e)) fail(`${where}: a result is out of range.`);
       for (const e of arr(s.recentSigned, RECENT_PER_TASK, w)) if (!isNum(e, -MAX_CENTS, MAX_CENTS)) fail(`${where}: a result is out of range.`);
       if (s.recentSteadiness !== undefined) {
@@ -373,6 +393,7 @@ export function createErrorStore({ key, tasks, steadiness = false, verb = 'tune'
     insights,
     data,
     validate,
+    resetMissStreak,
   };
 }
 

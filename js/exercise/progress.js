@@ -10,9 +10,9 @@
 // Version-1 data (no log) loads fine.
 
 import { getProgress, saveProgress, getSettings, updateSettings } from '../storage.js';
-import { CHORDS, TUNINGS, VOICE_PARTS, registerBand } from '../music/tuning.js';
+import { CHORDS, TUNINGS, VOICE_PARTS, registerBand, roundCents, formatCents } from '../music/tuning.js';
 import { createStaircase } from './staircase.js';
-import { tuneStore, TUNE_IT_KEY, RATING_LIMITS } from './tune-it.js';
+import { tuneStore, TUNE_IT_KEY, TUNE_TASKS, RATING_LIMITS } from './tune-it.js';
 import { SING_STORES, SING_MATCH_KEY, SING_KEY } from './sing.js';
 
 /** Every chapter key that stores progress. */
@@ -102,6 +102,7 @@ function load(chapterKey) {
     answered: count(d.answered),
     correct: count(d.correct),
     streak: count(d.streak),
+    missStreak: count(d.missStreak),
     bestStreak: count(d.bestStreak),
     bestThresholdCents: posOrNull(d.bestThresholdCents),
     history,
@@ -115,6 +116,7 @@ function statsFrom(chapterKey, data) {
     answered: data.answered,
     correct: data.correct,
     streak: data.streak,
+    missStreak: data.missStreak,
     bestStreak: data.bestStreak,
     levelCents: st.level(),
     thresholdCents: st.threshold(),
@@ -158,6 +160,7 @@ export function recordResult(chapterKey, staircase, { correct, detail = null, no
   data.answered += 1;
   if (ok) data.correct += 1;
   data.streak = ok ? data.streak + 1 : 0;
+  data.missStreak = ok ? 0 : data.missStreak + 1;
   data.bestStreak = Math.max(data.bestStreak, data.streak);
 
   const threshold = staircase.threshold();
@@ -264,27 +267,27 @@ function groupSummary(entries) {
 }
 
 const DIRECTION_LABELS = {
-  'higher-or-lower': { sharp: 'Second note higher (sharp)', flat: 'Second note lower (flat)', same: 'Exactly the same' },
-  default: { sharp: 'One note sharp', flat: 'One note flat', none: 'All in tune' },
+  'higher-or-lower': { sharp: 'Second note higher', flat: 'Second note lower', same: 'Both the same' },
+  default: { sharp: 'One note too high', flat: 'One note too low', none: 'All in tune' },
 };
 
 const TONE_ORDER = ['Root', 'Third', 'Fifth', 'Seventh'];
 
 /**
- * Blind-spot insights for a chapter, from the last INSIGHT_LOG_MAX answers recorded with a
+ * Insights ("strengths" and "to work on") for an exercise, from the last INSIGHT_LOG_MAX answers recorded with a
  * `detail`. Groups (raw accuracy) only appear with >= INSIGHT_MIN_GROUP answers.
  * strengths / blindSpots are plain sentences based on difficulty-adjusted comparisons.
  * For 'tune-it', 'sing-match' and 'sing' this returns the error-based insights of that store
  * (getTuneInsights / getSingInsights: error in cents instead of accuracy).
  * @param {string} chapterKey
  * @returns {{answered: number, byRegister: object[], byDirection: object[], byTone?: object[],
- *   byChord?: object[], strengths: string[], blindSpots: string[]}}
+ *   byChord?: object[], strengths: string[], toWorkOn: string[], blindSpots: string[] (= toWorkOn)}}
  */
 export function getInsights(chapterKey) {
   if (errorStore(chapterKey)) return errorStore(chapterKey).insights();
   const log = load(chapterKey).log;
   const isChord = chapterKey !== 'higher-or-lower';
-  const subject = isChord ? 'chords rooted' : 'notes';
+  const subject = isChord ? 'chords with the root' : 'notes';
   const found = []; // { kind: 'strength'|'blind', text, size }
   const note = (cmp, strengthText, blindText) => {
     if (!cmp || !cmp.clear) return;
@@ -295,8 +298,9 @@ export function getInsights(chapterKey) {
   // Sharp-vs-flat difference: always a blind spot, phrased from the easier side.
   const asymmetry = (cmp, what, tail) => {
     if (!cmp || !cmp.clear) return;
-    const [hi, lo, a, b] = cmp.diff > 0 ? ['sharp', 'flat', cmp.accA, cmp.accB] : ['flat', 'sharp', cmp.accB, cmp.accA];
-    found.push({ kind: 'blind', text: `You catch a ${hi} ${what} much more often than a ${lo} one (${pct(a)} vs ${pct(b)}${tail}).`, size: Math.abs(cmp.diff) });
+    const sharpFirst = cmp.diff > 0;
+    const [a, b] = sharpFirst ? [cmp.accA, cmp.accB] : [cmp.accB, cmp.accA];
+    found.push({ kind: 'blind', text: what(sharpFirst, `(${pct(a)} vs ${pct(b)}${tail})`), size: Math.abs(cmp.diff) });
   };
   const result = { answered: log.length };
 
@@ -314,8 +318,8 @@ export function getInsights(chapterKey) {
     for (const g of regGroups) {
       const rest = log.filter((x) => x.m !== null && registerBand(x.m).index !== g.index);
       note(compareGroups(g.entries, rest),
-        (n) => `You do especially well with ${subject} in the ${g.label} range ${n} elsewhere, at similar difficulty).`,
-        (n) => `${capFirst(subject)} in the ${g.label} range are harder for you ${n} elsewhere, at similar difficulty).`);
+        (n) => `You do especially well with ${subject} in the ${g.label} range ${n} elsewhere, at the same difference).`,
+        (n) => `${capFirst(subject)} in the ${g.label} range are harder for you ${n} elsewhere, at the same difference).`);
     }
   }
 
@@ -325,18 +329,21 @@ export function getInsights(chapterKey) {
   result.byDirection = Object.keys(labels)
     .map((key) => ({ key, label: labels[key], ...groupSummary(byDir(key)) }))
     .filter((g) => g.answered >= INSIGHT_MIN_GROUP);
-  const what = isChord ? 'note' : 'change';
-  asymmetry(compareGroups(byDir('sharp'), byDir('flat')), what, ', at similar difficulty');
+  asymmetry(compareGroups(byDir('sharp'), byDir('flat')),
+    isChord
+      ? (up, n) => `You spot a note that's too ${up ? 'high' : 'low'} more often than one that's too ${up ? 'low' : 'high'} ${n}.`
+      : (up, n) => `You hear a ${up ? 'higher' : 'lower'} second note more often than a ${up ? 'lower' : 'higher'} one ${n}.`,
+    ', at the same difference');
   const nothing = chapterKey === 'higher-or-lower' ? 'same' : 'none';
   const changed = log.filter((x) => x.d === 'sharp' || x.d === 'flat');
   if (byDir(nothing).length) {
     note(compareGroups(byDir(nothing), changed),
       (n) => nothing === 'same'
-        ? `You're good at recognising when two notes are exactly the same ${n} on the other questions).`
-        : `You reliably recognise a chord that is perfectly in tune ${n} on the other questions).`,
+        ? `You reliably hear when both notes are the same ${n} on other rounds).`
+        : `You reliably hear when every note is in tune ${n} on other rounds).`,
       (n) => nothing === 'same'
-        ? `When the two notes are exactly the same, you often hear a difference that isn't there ${n} on the other questions).`
-        : `When the chord is perfectly in tune, you often still hear a problem ${n} on the other questions).`);
+        ? `When both notes are the same, you often hear a difference that isn't there ${n} on other rounds).`
+        : `When every note is in tune, you often still hear a problem ${n} on other rounds).`);
   }
 
   if (isChord) {
@@ -351,10 +358,11 @@ export function getInsights(chapterKey) {
       const mine = toned.filter((x) => x.t === t);
       if (tones.length >= 2) {
         note(compareGroups(mine, toned.filter((x) => x.t !== t)),
-          (n) => `You're quick to spot a mistuned ${name} ${n} for the other notes, at similar difficulty).`,
-          (n) => `A mistuned ${name} is harder for you to spot than the other notes ${n}, at similar difficulty).`);
+          (n) => `You spot an out-of-tune ${name} especially well ${n} for other notes, at the same difference).`,
+          (n) => `An out-of-tune ${name} is harder for you to spot ${n} for other notes, at the same difference).`);
       }
-      asymmetry(compareGroups(mine.filter((x) => x.d === 'sharp'), mine.filter((x) => x.d === 'flat')), name, '');
+      asymmetry(compareGroups(mine.filter((x) => x.d === 'sharp'), mine.filter((x) => x.d === 'flat')),
+        (up, n) => `You spot a ${name} that's too ${up ? 'high' : 'low'} more often than one that's too ${up ? 'low' : 'high'} ${n}.`, '');
     }
 
     // --- chord type ---
@@ -368,8 +376,8 @@ export function getInsights(chapterKey) {
       for (const k of chordKeys) {
         const plural = `${CHORDS[k].name.toLowerCase()}s`;
         note(compareGroups(chorded.filter((x) => x.h === k), chorded.filter((x) => x.h !== k)),
-          (n) => `You do especially well with ${plural} ${n} in the other chords, at similar difficulty).`,
-          (n) => `Mistunings in ${plural} are harder for you to spot ${n} in the other chords, at similar difficulty).`);
+          (n) => `You do especially well with ${plural} ${n} in other chords, at the same difference).`,
+          (n) => `Out-of-tune notes in ${plural} are harder for you to spot ${n} in other chords, at the same difference).`);
       }
     }
   }
@@ -377,6 +385,7 @@ export function getInsights(chapterKey) {
   const pick = (kind) => found.filter((f) => f.kind === kind).sort((a, b) => b.size - a.size).slice(0, 4).map((f) => f.text);
   result.strengths = pick('strength');
   result.blindSpots = pick('blind');
+  result.toWorkOn = result.blindSpots; // UX wording; blindSpots kept as the old name
   return result;
 }
 
@@ -387,30 +396,30 @@ export function getInsights(chapterKey) {
 const TIER_NAMES = ['Getting started', 'Tuning in', 'Good ear', 'Keen ear', 'Section leader', 'Golden ears'];
 
 const LISTENING_DESCRIPTIONS = [
-  'You hear clear mistunings. Every singer starts here, and the ear improves quickly with practice.',
-  'You notice when a neighbour is clearly off: the obvious sour notes in a rehearsal.',
-  'You catch the slips that make a chord sound sour, before the conductor has to stop the choir.',
-  'You hear small drifts that most singers miss, so you can fix your own pitch while you sing.',
-  'You can tell when a chord is almost, but not quite, locked in: the ear a section leader needs.',
-  'You hear differences of a few cents: the level where chords ring and overtones bloom.',
+  'You hear clear differences. Everyone starts here, and practice helps quickly.',
+  'You hear when a singer next to you is clearly out of tune.',
+  'You hear the small differences that make a chord sound out of tune.',
+  'You hear small changes most singers miss, so you can correct yourself while you sing.',
+  'You hear when a chord is almost, but not quite, in tune.',
+  'You hear differences of a few cents. At this level, chords can ring.',
 ];
 
 const TUNING_DESCRIPTIONS = [
-  'Your note lands in the right area. Listen for the wobble (beating) and follow it until it slows down.',
-  'You get close, like a singer who finds the note but still slides around on it.',
-  'Your tuning would pass in most choirs; careful listening will bring the last few cents.',
-  'You place notes accurately enough that the chords around you start to blend.',
-  'You tune like an experienced chorister: chords settle and ring when you join in.',
-  'You place notes within a few cents: the precision of top chamber choirs.',
+  'Your note is near the target. Listen for the wobble and move until it slows down.',
+  'You get close to the target, but your note still moves around a little.',
+  'Your tuning is good enough for most choir music. Careful listening brings the last few cents.',
+  'You place notes accurately, so the chords around you start to sound calm.',
+  'You tune like an experienced choir singer: chords sound calm when you join in.',
+  'You place notes within a few cents of the target, like singers in top chamber choirs.',
 ];
 
 const SINGING_DESCRIPTIONS = [
-  'Your voice finds the area of the note. Hold it steadily and listen — the rest comes with practice.',
-  'You land near the note; in a full choir you blend in, and careful listening will bring you closer.',
-  'You sing in tune well enough for most choir music; the last few cents come from listening while you sing.',
+  'Your voice finds the area of the note. Hold it steadily and listen.',
+  'You sing near the note. Careful listening will bring you closer.',
+  'You sing in tune well enough for most choir music.',
   'You place your notes accurately, so the chords around you start to ring.',
-  'You sing reliably in tune: the singers next to you can lean on your pitch.',
-  'You sing within a few cents of the target: the precision of top chamber choirs.',
+  'You sing reliably in tune, so other singers can follow your pitch.',
+  'You sing within a few cents of the target, like singers in top chamber choirs.',
 ];
 
 // A tier is reached when the measure (cents, lower = better) is <= its maxCents.
@@ -524,6 +533,8 @@ export function getRank(chapterKey, stats, opts = {}) {
     }
   }
 
+  // Shown and compared in the one rounding rule (roundCents), so "10 cents" never misses a ≤ 10 tier.
+  if (measureCents !== null) measureCents = roundCents(measureCents);
   let index = 0;
   if (measureCents !== null) {
     tiers.forEach((t, i) => {
@@ -549,9 +560,9 @@ export function getRank(chapterKey, stats, opts = {}) {
 
 /** Plain chapter names for the overview. */
 export const CHAPTER_LABELS = Object.freeze({
-  'higher-or-lower': 'Higher or lower?',
+  'higher-or-lower': 'Higher / lower',
   'odd-one-out': 'Odd one out',
-  'odd-or-in-tune': 'Odd one out — or all in tune?',
+  'odd-or-in-tune': 'Odd one out · sometimes all in tune',
   [TUNE_IT_KEY]: 'Lock it in',
   [SING_MATCH_KEY]: 'Echo',
   [SING_KEY]: 'Join the chord',
@@ -591,6 +602,7 @@ export function dailyStreak(dates, now = new Date()) {
 }
 
 const rankSummary = (r) => ({ name: r.name, index: r.index, tierCount: r.tiers.length, basis: r.basis });
+const rc = (x) => (typeof x === 'number' ? roundCents(x) : x);
 const ratio = (a, b) => (b > 0 ? Math.round((a / b) * 1000) / 1000 : null);
 
 /**
@@ -625,8 +637,8 @@ export function getOverview({ now = new Date() } = {}) {
         key,
         label: CHAPTER_LABELS[key],
         rank: rankSummary(getRank(key, s)),
-        bestCents: dayAverages.length ? Math.min(...dayAverages) : null,
-        currentCents: s.recentAvgAbsError,
+        bestCents: dayAverages.length ? rc(Math.min(...dayAverages)) : null,
+        currentCents: rc(s.recentAvgAbsError),
         answered: s.attempts,
         correct: null,
         accuracy: ratio(log.filter((x) => x.e <= RATING_LIMITS.good).length, log.length),
@@ -641,15 +653,15 @@ export function getOverview({ now = new Date() } = {}) {
             label: t.label,
             group: t.group,
             attempts: p.attempts,
-            recentAvgAbsError: p.recentAvgAbsError,
-            bestAbsError: p.bestAbsError,
+            recentAvgAbsError: rc(p.recentAvgAbsError),
+            bestAbsError: rc(p.bestAbsError),
             rank: rankSummary(getRank(key, s, { taskKey: t.key })),
           };
-          if (p.steadinessCents !== undefined) task.steadinessCents = p.steadinessCents;
+          if (p.steadinessCents !== undefined) task.steadinessCents = rc(p.steadinessCents);
           return task;
         }),
       };
-      if (s.steadinessCents !== undefined) chapter.steadinessCents = s.steadinessCents;
+      if (s.steadinessCents !== undefined) chapter.steadinessCents = rc(s.steadinessCents);
       chapters.push(chapter);
       insightsByChapter.push([key, store.insights()]);
       continue;
@@ -661,8 +673,8 @@ export function getOverview({ now = new Date() } = {}) {
       key,
       label: CHAPTER_LABELS[key],
       rank: rankSummary(getRank(key, stats)),
-      bestCents: stats.bestThresholdCents,
-      currentCents: stats.answered > 0 ? (stats.thresholdCents ?? stats.levelCents) : null,
+      bestCents: rc(stats.bestThresholdCents),
+      currentCents: stats.answered > 0 ? rc(stats.thresholdCents ?? stats.levelCents) : null,
       answered: stats.answered,
       correct: stats.correct,
       accuracy: ratio(stats.correct, stats.answered),
@@ -698,6 +710,7 @@ export function getOverview({ now = new Date() } = {}) {
     },
     strengths: top('strengths'),
     blindSpots: top('blindSpots'),
+    toWorkOn: top('blindSpots'),
   };
 }
 
@@ -738,6 +751,18 @@ export function exportAllProgress() {
 // --- strict validation for import ---------------------------------------------
 
 class ImportError extends Error {}
+
+/** The plain messages importAllProgress returns (UX-WRITING); details go to the console. */
+export const IMPORT_ERRORS = Object.freeze({
+  notBackup: "This isn't a Choir Intonation Trainer backup file.",
+  damaged: 'This backup file is damaged, so nothing was changed.',
+  newer: 'This backup is from a newer version. Reload the app, then try again.',
+});
+
+function importFailure(error, detail) {
+  try { console.warn(`Backup not loaded: ${detail}`); } catch { /* no console */ }
+  return { ok: false, error, detail };
+}
 const fail = (msg) => { throw new ImportError(msg); };
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 const isInt = (x, min = 0, max = Number.MAX_SAFE_INTEGER) => Number.isInteger(x) && x >= min && x <= max;
@@ -776,7 +801,8 @@ function validateStaircase(s, where) {
 
 function validateListening(d, where) {
   if (!isObj(d)) fail(`${where} is damaged.`);
-  checkKeys(d, ['version', 'staircase', 'answered', 'correct', 'streak', 'bestStreak', 'bestThresholdCents', 'history', 'log'], where);
+  checkKeys(d, ['version', 'staircase', 'answered', 'correct', 'streak', 'missStreak', 'bestStreak', 'bestThresholdCents', 'history', 'log'], where);
+  if (d.missStreak !== undefined && !isInt(d.missStreak, 0, d.answered)) fail(`${where}: the totals do not add up.`);
   if (d.version !== 2) fail(`${where} has an unknown format.`);
   validateStaircase(d.staircase, where);
   if (!isInt(d.answered) || !isInt(d.correct, 0, d.answered) || !isInt(d.streak, 0, d.answered) ||
@@ -826,9 +852,12 @@ function validateSettings(s) {
  */
 export function importAllProgress(data) {
   try {
-    if (!isObj(data) || data.app !== EXPORT_APP_ID) fail('This file is not a Choir Trainer progress file.');
-    if (!isInt(data.schemaVersion, 1)) fail('This file is not a Choir Trainer progress file.');
-    if (data.schemaVersion > EXPORT_SCHEMA_VERSION) fail('This file was made by a newer version of the app. Please update the app first.');
+    if (!isObj(data) || data.app !== EXPORT_APP_ID || !isInt(data.schemaVersion, 1)) {
+      return importFailure(IMPORT_ERRORS.notBackup, 'not an export of this app (app id / schema version)');
+    }
+    if (data.schemaVersion > EXPORT_SCHEMA_VERSION) {
+      return importFailure(IMPORT_ERRORS.newer, `schema version ${data.schemaVersion} > ${EXPORT_SCHEMA_VERSION}`);
+    }
     if (!own(EXPORT_KEYS_BY_VERSION, data.schemaVersion)) fail('This file was made by an older, unsupported version of the app.');
     if (typeof data.exportedAt !== 'string' || Number.isNaN(Date.parse(data.exportedAt))) fail('This file has no valid export date.');
     validateSettings(data.settings);
@@ -841,8 +870,7 @@ export function importAllProgress(data) {
       else validateListening(value, where);
     }
   } catch (e) {
-    if (e instanceof ImportError) return { ok: false, error: e.message };
-    return { ok: false, error: 'This file could not be read.' };
+    return importFailure(IMPORT_ERRORS.damaged, e instanceof ImportError ? e.message : String(e));
   }
 
   const copy = JSON.parse(JSON.stringify(data));
@@ -851,4 +879,98 @@ export function importAllProgress(data) {
   }
   updateSettings(copy.settings);
   return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// "Make it easier" (tip after 3 misses) and a small session tracker
+// ---------------------------------------------------------------------------
+
+/** "Make it easier" raises a listening difference by this factor (once per call). */
+export const EASIER_FACTOR = 1.5;
+/** Tip after this many misses in a row (listening: wrong answers; producing: rounds below "close"). */
+export const MISS_STREAK_TIP = 3;
+
+/** Suggested easier task for each Lock it in / Join the chord task (null = already the easiest). */
+export const EASIER_TASKS = Object.freeze({
+  'minor-second': 'fifth', 'major-second': 'fifth', 'minor-third': 'fifth', 'major-third': 'fifth', fourth: 'fifth',
+  tritone: 'fifth', fifth: 'octave', 'minor-sixth': 'fifth', 'major-sixth': 'fifth', 'minor-seventh': 'fifth',
+  'major-seventh': 'fifth', octave: null,
+  'third-in-major': 'fifth-in-major', 'fifth-in-major': 'fifth', 'third-in-minor': 'third-in-major',
+  'fifth-in-minor': 'fifth-in-major', 'seventh-in-dom7': 'third-in-major', 'seventh-in-maj7': 'third-in-major',
+});
+
+/**
+ * "Make it easier" after a run of misses. Resets the miss streak.
+ * Listening exercises ('higher-or-lower', 'odd-one-out', 'odd-or-in-tune'): raises the saved difference
+ * ×EASIER_FACTOR (up to the exercise's maximum) and returns the resumed staircase to use from now on:
+ *   -> { kind: 'difference', before, after (cents, roundCents), staircase }
+ * Producing exercises ('tune-it', 'sing'): suggests an easier task (the caller switches to it):
+ *   -> { kind: 'task', taskKey, label, group } | { kind: 'none' } (already the easiest; also 'sing-match').
+ * @param {string} chapterKey @param {string} [taskKey] the current task (producing exercises)
+ */
+export function makeEasier(chapterKey, taskKey) {
+  const store = errorStore(chapterKey);
+  if (store) {
+    store.resetMissStreak(taskKey);
+    const suggestion = taskKey && Object.prototype.hasOwnProperty.call(EASIER_TASKS, taskKey) ? EASIER_TASKS[taskKey] : null;
+    const task = suggestion && chapterKey !== SING_MATCH_KEY ? TUNE_TASKS.find((t) => t.key === suggestion) : null;
+    return task ? { kind: 'task', taskKey: task.key, label: task.label, group: task.group } : { kind: 'none' };
+  }
+  if (!own(DEFAULT_STAIRCASE_OPTS, chapterKey)) throw new Error(`makeEasier: unknown exercise "${chapterKey}"`);
+  const opts = defaultOpts(chapterKey);
+  const data = load(chapterKey);
+  const before = createStaircase(opts, data.staircase);
+  const state = before.state();
+  state.level = Math.min(opts.max, state.level * EASIER_FACTOR);
+  data.staircase = state;
+  data.missStreak = 0;
+  saveProgress(chapterKey, data);
+  const staircase = createStaircase(opts, state);
+  return { kind: 'difference', before: roundCents(before.level()), after: roundCents(staircase.level()), staircase };
+}
+
+/**
+ * Session tracker for the "every 10th round" summary card (INTERACTION-DESIGN 13). Pure, in memory.
+ * record({ correct, levelCents?, absError? }) after each round; summary() ->
+ *   { rounds, right, bestStreak, startCents, nowCents (listening difference), averageCents (producing) };
+ * text() -> '10 rounds · 7 right · difference 31 → 24 cents · best streak 4'
+ *   (producing: '10 rounds · 7 in tune · 6 cents off on average · best streak 4').
+ */
+export function createSessionTracker() {
+  const rounds = [];
+  return {
+    record({ correct, levelCents = null, absError = null } = {}) {
+      rounds.push({ correct: !!correct, levelCents: typeof levelCents === 'number' ? levelCents : null, absError: typeof absError === 'number' ? absError : null });
+    },
+    summary() {
+      let streak = 0, bestStreak = 0;
+      for (const r of rounds) { streak = r.correct ? streak + 1 : 0; bestStreak = Math.max(bestStreak, streak); }
+      const levels = rounds.map((r) => r.levelCents).filter((x) => x !== null);
+      const errors = rounds.map((r) => r.absError).filter((x) => x !== null);
+      return {
+        rounds: rounds.length,
+        right: rounds.filter((r) => r.correct).length,
+        bestStreak,
+        startCents: levels.length ? roundCents(levels[0]) : null,
+        nowCents: levels.length ? roundCents(levels[levels.length - 1]) : null,
+        averageCents: errors.length ? roundCents(errors.reduce((a, b) => a + b, 0) / errors.length) : null,
+      };
+    },
+    text() {
+      const s = this.summary();
+      const parts = [`${s.rounds} ${s.rounds === 1 ? 'round' : 'rounds'}`];
+      if (s.averageCents !== null) {
+        parts.push(`${s.right} in tune`, `${formatCents(s.averageCents)} off on average`);
+      } else {
+        parts.push(`${s.right} right`);
+        if (s.startCents !== null) {
+          parts.push(s.startCents === s.nowCents
+            ? `difference ${formatCents(s.nowCents)}`
+            : `difference ${s.startCents} → ${formatCents(s.nowCents)}`);
+        }
+      }
+      parts.push(`best streak ${s.bestStreak}`);
+      return parts.join(' · ');
+    },
+  };
 }

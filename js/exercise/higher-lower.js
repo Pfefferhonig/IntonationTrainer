@@ -2,7 +2,9 @@
 // (higher) or flat (lower) — or, with allowSame, sometimes exactly the same.
 // Pure logic: no DOM, no audio.
 
-import { randomRootFreq, shiftByCents, formatCents, describeFreq } from '../music/tuning.js';
+import {
+  randomRootFreq, shiftByCents, formatCents, describeFreq, centsBetween, rootName, roundCents, semitoneFraction,
+} from '../music/tuning.js';
 
 /** Share of 'same' questions when allowSame is on. */
 export const SAME_PROBABILITY = 0.25;
@@ -44,43 +46,62 @@ export function makeQuestion({ cents, voicePart = 'any', allowSame = false, rng 
  * Check an answer.
  * @param {{direction: 'sharp'|'flat'|'same', cents: number}} question
  * @param {'sharp'|'flat'|'same'} answer
- * @returns {{correct: boolean, message: string}}
+ * Messages (UX-WRITING patterns): 'Right — the second note was 12 cents higher.' /
+ * 'Not this time — the second note was 12 cents lower.' / '… 12 cents higher, not the same.' /
+ * 'Right — both notes were exactly the same.' / 'Not this time — both notes were exactly the same.'
+ * level: 'in-tune' when right, else 'keep-going'.
+ * @returns {{correct: boolean, level: 'in-tune'|'keep-going', message: string}}
  */
 export function checkAnswer(question, answer) {
   if (!ANSWERS.includes(answer)) {
     throw new Error(`higher-lower: answer must be 'sharp', 'flat' or 'same', got ${answer}`);
   }
   const correct = answer === question.direction;
+  const level = correct ? 'in-tune' : 'keep-going';
+  const opener = correct ? 'Right' : 'Not this time';
   if (question.direction === 'same') {
-    return {
-      correct,
-      message: correct ? 'Yes — they were exactly the same.' : 'They were actually the same note.',
-    };
+    return { correct, level, message: `${opener} — both notes were exactly the same.` };
   }
-  const size = formatCents(question.cents);
-  const actual = question.direction === 'sharp' ? 'higher (sharp)' : 'lower (flat)';
-  let message;
-  if (correct) message = `Yes, the second note was ${size} ${actual}.`;
-  else if (answer === 'same') message = `They were not quite the same: the second note was ${size} ${actual}.`;
-  else message = `Not this time: the second note was ${size} ${actual}.`;
-  return { correct, message };
+  const fact = `the second note was ${formatCents(question.cents)} ${question.direction === 'sharp' ? 'higher' : 'lower'}`;
+  const tail = !correct && answer === 'same' ? ', not the same' : '';
+  return { correct, level, message: `${opener} — ${fact}${tail}.` };
 }
 
 /**
  * What actually sounded, for after the answer.
  * title e.g. 'First note: A3 +12; second note: A3 +27'.
  * notes: [{ label, name, cents, played, inTune }] — for the second note, inTune is the first
- * note (where it would have been with no change).
+ * note (where it would have been with no change). (Piano-grid names; kept until the UI uses
+ * the fields below.)
+ * New (design critique #1): the pair is described by the difference, never as two notes:
+ *   first / second: the first note's key name ('C4') — the second note keeps that name even if
+ *     the change crosses to another piano key;
+ *   relation: '56 cents lower (about half a semitone)' | '12 cents higher' | 'exactly the same';
+ *   tones: [{ label: 'First note', name, deviation: null, isOff: false, isYours: false },
+ *           { label: 'Second note', name, deviation: { cents (signed), text: '56 cents lower' } | null,
+ *             isOff: direction !== 'same', isYours: false }].
  * @param {object} question from makeQuestion
  */
 export function describe(question) {
   const first = describeFreq(question.firstFreq);
   const second = describeFreq(question.secondFreq);
+  const name = rootName(question.firstFreq).name;
+  const diff = question.direction === 'same' ? 0 : centsBetween(question.firstFreq, question.secondFreq);
+  const c = roundCents(diff);
+  const short = c === 0 ? null : `${formatCents(c)} ${c > 0 ? 'higher' : 'lower'}`;
+  const fraction = semitoneFraction(c);
   return {
     title: `First note: ${first.text}; second note: ${second.text}`,
     notes: [
       { label: 'First note', name: first.name, cents: first.cents, played: first, inTune: first },
       { label: 'Second note', name: second.name, cents: second.cents, played: second, inTune: first },
+    ],
+    first: name,
+    second: name,
+    relation: short ? (fraction ? `${short} (${fraction})` : short) : 'exactly the same',
+    tones: [
+      { label: 'First note', name, deviation: null, isOff: false, isYours: false },
+      { label: 'Second note', name, deviation: short ? { cents: c, text: short } : null, isOff: c !== 0, isYours: false },
     ],
   };
 }

@@ -23,7 +23,8 @@
  *                                                              |
  *   per playback:  input Gain -> [timbre filters] -> output Gain (stop fade)
  *                                                       |            |
- *                                                       |       reverb send Gain -> Convolver -> reverb return Gain
+ *                                                       |       reverb send Gain -> Convolver A|B -> return Gain A|B
+ *                                                       |       (two convolvers used in turn; send disconnected at 0)
  *                                                       v                                               |
  *   shared:        master Gain (volume) <-------------------------------------------------------------- +
  *                     -> DynamicsCompressor (peak limiter) -> destination
@@ -41,6 +42,11 @@ import { SAMPLE_SETS } from './samples-manifest.js';
 
 /** Seconds between "now" and the first scheduled sound (scheduling headroom). */
 const LOOKAHEAD = 0.05;
+/** The same on light quality (phones: slower main thread, bigger output buffers). */
+const LOOKAHEAD_LIGHT = 0.12;
+
+/** Auto quality: render slower than this % of real time (benchmark) -> light. */
+const BENCH_LIGHT_PERCENT = 12; // this dev desktop: 3.8 % (1 s render incl. setup)
 
 /** Fade-out time used by stop(), in seconds. */
 const STOP_FADE = 0.04;
@@ -58,8 +64,12 @@ const MIN_DURATION = 0.01;
  */
 const BASE_RMS = 0.16;
 
-/** Maximum master gain (at setMasterVolume(1)); leaves room for limiter makeup gain. */
-const MASTER_MAX_GAIN = 0.85;
+/**
+ * Maximum master gain (at setMasterVolume(1)). With it the loudest chord
+ * (4-note organ, full room echo) peaks at about -3.4 dBFS before the limiter,
+ * below the limiter's -1 dBFS threshold: the limiter normally never acts.
+ */
+const MASTER_MAX_GAIN = 0.8;
 
 /** Default master volume, matches the storage.js default setting. */
 const DEFAULT_VOLUME = 0.7;
@@ -284,30 +294,278 @@ let masterGain = null;
 let limiter = null;
 let masterVolume = DEFAULT_VOLUME;
 
-/** Reverb chain (null if the browser could not create it). */
-/** @type {GainNode|null} */
-let reverbSend = null;
-/** @type {GainNode|null} */
-let reverbReturn = null;
-/** @type {ConvolverNode|null} */
-let convolver = null;
-/** @type {AudioBuffer|null} */
-let roomImpulse = null;
+/**
+ * Shared reverb (null if the browser could not create it). Two convolvers
+ * used in turn ("ping-pong"), so cutting the tail (stopAll) never has to build
+ * a new convolver on the main thread: the send just switches to the other,
+ * idle one. The send is disconnected entirely while the amount is 0, so the
+ * convolvers then cost nothing.
+ * @type {{send: GainNode, conv: ConvolverNode[], ret: GainNode[], cur: number,
+ *         connected: boolean, kind: string}|null}
+ */
+let reverb = null;
 let reverbAmount = DEFAULT_REVERB;
-let flushToken = 0;
+let reverbOffTimer = null;
 
 /** @type {AudioBuffer|null} */
 let noiseBuffer = null;
 let noiseOffset = 0;
 
-/** Cached { harmonics, wave } per timbre/register key (single shared context). */
-const waveCache = new Map();
+/** Cached { harmonics, wave } per timbre/register key, per AudioContext
+ *  (PeriodicWaves belong to the context that made them; offline renders get their own). */
+const waveCaches = new WeakMap();
+function getWaveCache() {
+  let m = waveCaches.get(ctx);
+  if (!m) {
+    m = new Map();
+    waveCaches.set(ctx, m);
+  }
+  return m;
+}
 
 /** Cached frequency grid for noise RMS estimation, per Nyquist. */
 let noiseGrid = null;
 
 /** Currently active playback handles. */
 const activePlaybacks = new Set();
+
+// ---------------------------------------------------------------------------
+// Audio quality ('high' | 'light'; 'auto' picks light on phones/tablets and
+// on devices that render slowly) and output buffer size (latencyHint)
+// ---------------------------------------------------------------------------
+
+/** @type {'auto'|'high'|'light'} */
+let qualitySetting = 'auto';
+/** Result of the render-speed benchmark (auto mode on non-mobile devices). */
+let benchmark = null; // { renderPercent, light }
+let benchmarkScheduled = false;
+/** Used by the benchmark to measure the high-quality graph. */
+let forcedQuality = null;
+/** latencyHint the live context was created with. */
+let ctxLatencyHint = null;
+/** The live context must be recreated (new latencyHint) at the next safe moment. */
+let recreatePending = false;
+/** Number of users (e.g. the microphone) that need the live context to stay. */
+let contextHolds = 0;
+
+/**
+ * Developer/test override from the page address, e.g. ?latency=0.2,
+ * ?latency=playback, ?latency=interactive, ?latency=balanced
+ * (lets the owner compare buffer sizes on a phone without a new upload).
+ * @returns {number|string|null}
+ */
+function latencyFromUrl() {
+  try {
+    const q = globalThis.location && globalThis.location.search;
+    if (!q) return null;
+    const v = new URLSearchParams(q).get('latency');
+    if (!v) return null;
+    if (v === 'interactive' || v === 'balanced' || v === 'playback') return v;
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 && n <= 1 ? n : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** Phones and tablets (Android, iOS, iPadOS), from the user agent and touch screen. */
+function isMobileDevice() {
+  const nav = globalThis.navigator;
+  if (!nav) return false;
+  if (nav.userAgentData && nav.userAgentData.mobile) return true;
+  const ua = nav.userAgent || '';
+  if (/Android|iPhone|iPad|iPod|Mobile|Silk|Kindle/i.test(ua)) return true;
+  // iPadOS reports itself as a Mac; it has a touch screen.
+  if (/Macintosh/.test(ua) && nav.maxTouchPoints > 1) return true;
+  const scr = globalThis.screen;
+  return nav.maxTouchPoints > 1 && !!scr && Math.min(scr.width, scr.height) < 820;
+}
+
+/** @returns {{quality: 'high'|'light', reason: string}} */
+function resolveQuality() {
+  if (forcedQuality) return { quality: forcedQuality, reason: 'forced' };
+  if (qualitySetting === 'high' || qualitySetting === 'light') return { quality: qualitySetting, reason: 'setting' };
+  if (isMobileDevice()) return { quality: 'light', reason: 'phone or tablet' };
+  if (benchmark && benchmark.light) return { quality: 'light', reason: 'slow device (render benchmark)' };
+  return { quality: 'high', reason: benchmark ? 'render benchmark' : 'desktop' };
+}
+
+function effectiveQuality() {
+  return resolveQuality().quality;
+}
+
+/**
+ * Output buffer size. 'interactive' (the smallest buffers, the browser
+ * default for most apps) makes some Android phones stutter at random (seen on
+ * a Samsung Galaxy S22 with a Chromium browser). This app does not need low
+ * latency, so phones get 'playback' (large buffers) and desktops 'balanced'.
+ * A ?latency=... URL parameter overrides it.
+ */
+function latencyHintFor(quality) {
+  const fromUrl = latencyFromUrl();
+  if (fromUrl != null) return fromUrl;
+  return quality === 'light' ? 'playback' : 'balanced';
+}
+
+/** Scheduling headroom: more on light quality (slower main thread, bigger buffers). */
+function lookahead() {
+  return effectiveQuality() === 'light' ? LOOKAHEAD_LIGHT : LOOKAHEAD;
+}
+
+/** Reverb impulse for a quality: high = 1.4 s stereo room, light = 0.7 s mono. */
+function reverbKindFor(quality) {
+  return quality === 'light' ? 'light' : 'high';
+}
+
+/**
+ * Choose the audio quality: 'high' (full room echo, breath/bow noise,
+ * 'balanced' output buffers), 'light' (large output buffers, shorter mono
+ * room echo, onset noise only, more scheduling headroom) or 'auto' (light on
+ * phones/tablets and on devices that render slowly; the default).
+ * Pitch accuracy is identical in all modes.
+ * A change of buffer size takes effect at the next initAudio() (the next
+ * button press) while nothing is playing and the microphone is closed.
+ * @param {'auto'|'high'|'light'} q
+ */
+export function setAudioQuality(q) {
+  if (q !== 'auto' && q !== 'high' && q !== 'light') return;
+  qualitySetting = q;
+  applyQuality();
+}
+
+/** @returns {'auto'|'high'|'light'} the setting (see getAudioQualityInfo for what is in effect). */
+export function getAudioQuality() {
+  return qualitySetting;
+}
+
+/**
+ * What is in effect, with device details (for a "sound problems?" panel or
+ * the console).
+ * @returns {{setting: string, effective: 'high'|'light', reason: string,
+ *   latencyHint: (string|number|null), sampleRate: number|null, baseLatency: number|null,
+ *   outputLatency: number|null, state: string|null, renderPercent: number|null,
+ *   pendingRestart: boolean, userAgent: string}}
+ */
+export function getAudioQualityInfo() {
+  const { quality, reason } = resolveQuality();
+  const live = ctx && !isOffline(ctx) ? ctx : null;
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 10000) / 10000 : null);
+  return {
+    setting: qualitySetting,
+    effective: quality,
+    reason,
+    latencyHint: ctxLatencyHint,
+    sampleRate: live ? live.sampleRate : null,
+    baseLatency: live ? num(live.baseLatency) : null,
+    outputLatency: live ? num(live.outputLatency) : null,
+    state: live ? live.state : null,
+    renderPercent: benchmark ? benchmark.renderPercent : null,
+    pendingRestart: recreatePending,
+    userAgent: (globalThis.navigator && navigator.userAgent) || '',
+  };
+}
+
+/** Log the audio setup to the console (no UI needed: chrome://inspect / remote debugging). */
+function logAudioInfo(when) {
+  try {
+    console.info(`[audio] ${when}:`, JSON.stringify(getAudioQualityInfo()));
+  } catch (e) { /* ignore */ }
+}
+
+/** Apply a (possibly) changed effective quality to the live context. */
+function applyQuality() {
+  if (!ctx || isOffline(ctx)) return;
+  const q = effectiveQuality();
+  if (latencyHintFor(q) !== ctxLatencyHint) recreatePending = true;
+  if (reverb && reverb.kind !== reverbKindFor(q)) {
+    try {
+      buildReverb();
+    } catch (e) {
+      console.warn('[audio] reverb rebuild failed:', e);
+    }
+  }
+}
+
+/**
+ * Keep the live AudioContext (no recreation for a new buffer size) while
+ * held. Used by the microphone (js/audio/pitch.js). Returns a release function.
+ * @returns {() => void}
+ */
+export function holdAudioContext() {
+  contextHolds += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    contextHolds = Math.max(0, contextHolds - 1);
+  };
+}
+
+/**
+ * Auto mode on non-mobile devices: render 1 s of a 4-note voice chord with
+ * room echo offline (the high-quality graph) and time it. Rendering slower
+ * than BENCH_LIGHT_PERCENT of real time switches to light quality.
+ * Runs once, about 2 s after the first initAudio, only while nothing plays.
+ */
+function scheduleBenchmark() {
+  if (benchmarkScheduled || benchmark || qualitySetting !== 'auto' || isMobileDevice()) return;
+  if (!(globalThis.OfflineAudioContext || globalThis.webkitOfflineAudioContext)) return;
+  benchmarkScheduled = true;
+  const attempt = (tries) => {
+    if (activePlaybacks.size > 0 && tries > 0) {
+      setTimeout(() => attempt(tries - 1), 2000);
+      return;
+    }
+    const r = 196;
+    forcedQuality = 'high';
+    let job;
+    try {
+      job = renderOffline(1, () => playChord([r, r * 1.25, r * 1.5, r * 1.75], { duration: 0.9, timbre: 'voice' }));
+    } catch (e) {
+      job = Promise.reject(e);
+    } finally {
+      forcedQuality = null;
+    }
+    job.then(
+      ({ renderMs }) => {
+        const renderPercent = Math.round(renderMs) / 10; // ms per 1 s of audio -> %
+        benchmark = { renderPercent, light: renderPercent > BENCH_LIGHT_PERCENT };
+        applyQuality();
+      },
+      () => { benchmark = { renderPercent: null, light: false }; },
+    );
+  };
+  setTimeout(() => attempt(5), 2000);
+}
+
+/**
+ * Pre-create the PeriodicWaves of the synth timbres over the singing range
+ * in small idle chunks after the context is created, so that pressing Play
+ * never has to build them (no main-thread spike at play time).
+ */
+function prewarmWaves() {
+  const live = ctx;
+  const jobs = [];
+  for (const key of Object.keys(TIMBRE_SPECS)) {
+    const spec = TIMBRE_SPECS[key];
+    if (spec.native || spec.sampled) continue;
+    if (!spec.spectra) {
+      jobs.push([key, spec, 220]);
+      continue;
+    }
+    // 1/6-octave grid from ~55 Hz to ~1400 Hz (the same grid timbreAt uses)
+    for (let step = 35; step <= 63; step++) jobs.push([key, spec, Math.pow(2, step / 6)]);
+  }
+  const tick = () => {
+    if (ctx !== live || !jobs.length) return;
+    for (let i = 0; i < 4 && jobs.length; i++) {
+      const [key, spec, f] = jobs.shift();
+      try { timbreAt(key, spec, f); } catch (e) { /* ignore */ }
+    }
+    setTimeout(tick, 16);
+  };
+  setTimeout(tick, 50);
+}
 
 // ---------------------------------------------------------------------------
 // Context management
@@ -326,11 +584,17 @@ function reverbToGain(v) {
   return REVERB_MAX_WET * v;
 }
 
-function makeConvolver() {
-  const c = ctx.createConvolver();
-  c.normalize = false; // the impulse is already energy-normalized
-  c.buffer = roomImpulse;
-  return c;
+/**
+ * iOS/iPadOS Safari 16.4+: play through the speaker even when the ring/silent
+ * switch is on ('playback'); the microphone code switches to 'play-and-record'
+ * while the microphone is open. No-op in other browsers.
+ * @param {'playback'|'play-and-record'} type
+ */
+export function setAudioSessionType(type) {
+  try {
+    const s = globalThis.navigator && navigator.audioSession;
+    if (s && s.type !== type) s.type = type;
+  } catch (e) { /* ignore */ }
 }
 
 /**
@@ -341,18 +605,55 @@ function ensureContext() {
   if (ctx) return ctx;
   const Ctor = globalThis.AudioContext || globalThis.webkitAudioContext;
   if (!Ctor) throw new Error('This browser does not support the Web Audio API.');
+  // The sample rate is never forced: the device's own rate avoids resampling.
+  const hint = latencyHintFor(effectiveQuality());
   try {
-    ctx = new Ctor({ latencyHint: 'interactive' });
+    ctx = new Ctor({ latencyHint: hint });
+    ctxLatencyHint = hint;
   } catch (e) {
     ctx = new Ctor();
+    ctxLatencyHint = 'default';
   }
+  recreatePending = false;
+  if (contextHolds === 0) setAudioSessionType('playback');
+  const live = ctx;
+  try {
+    let wasRunning = false;
+    let interrupted = false;
+    live.addEventListener('statechange', () => {
+      if (ctx !== live) return;
+      const st = live.state;
+      // System interruptions (phone call, iOS audio interruption, OS suspend)
+      // after the sound had been running, and the recovery from them.
+      if (st === 'running') {
+        if (interrupted) notifyInterruption(st);
+        wasRunning = true;
+        interrupted = false;
+      } else if ((st === 'suspended' || st === 'interrupted') && wasRunning && !interrupted) {
+        interrupted = true;
+        notifyInterruption(st);
+      }
+      logAudioInfo(`state ${st}`);
+      // outputLatency is only known a moment after the output has started.
+      if (live.state === 'running') setTimeout(() => { if (ctx === live) logAudioInfo('running 1 s'); }, 1000);
+    });
+  } catch (e) { /* ignore */ }
+  buildGraph();
+  logAudioInfo('context created');
+  prewarmWaves();
+  scheduleBenchmark();
+  return ctx;
+}
 
-  // Gentle peak limiter: the threshold sits above normal playing levels so
-  // that, in normal use, it does nothing (any gain riding would modulate the
-  // beating we want people to hear). It only catches rare peaks at full volume.
+/** Build the shared master chain (limiter, volume, reverb, noise) on `ctx`. */
+function buildGraph() {
+  // Safety limiter only: its threshold (-1 dBFS) sits above the loudest chord
+  // at full volume (about -3.4 dBFS before the limiter), so in normal use it
+  // does nothing (gain riding would modulate the beating we want people to
+  // hear) and adds almost no make-up gain.
   limiter = ctx.createDynamicsCompressor();
-  limiter.threshold.value = -3;
-  limiter.knee.value = 3;
+  limiter.threshold.value = -1;
+  limiter.knee.value = 2;
   limiter.ratio.value = 12;
   limiter.attack.value = 0.003;
   limiter.release.value = 0.15;
@@ -362,19 +663,12 @@ function ensureContext() {
   masterGain.connect(limiter);
   limiter.connect(ctx.destination);
 
-  // Shared room reverb (optional: the engine works without it).
+  reverb = null;
   try {
-    roomImpulse = createRoomImpulse(ctx);
-    reverbSend = ctx.createGain();
-    reverbSend.gain.value = reverbToGain(reverbAmount);
-    reverbReturn = ctx.createGain();
-    convolver = makeConvolver();
-    reverbSend.connect(convolver);
-    convolver.connect(reverbReturn);
-    reverbReturn.connect(masterGain);
+    buildReverb();
   } catch (e) {
     console.warn('[audio] reverb unavailable:', e);
-    reverbSend = reverbReturn = convolver = null;
+    reverb = null;
   }
 
   try {
@@ -382,12 +676,61 @@ function ensureContext() {
   } catch (e) {
     noiseBuffer = null;
   }
-  return ctx;
+}
+
+/** (Re)build the reverb for the current quality (keeps the existing send node). */
+function buildReverb() {
+  const kind = reverbKindFor(effectiveQuality());
+  const impulse = kind === 'light'
+    ? createRoomImpulse(ctx, { duration: 0.7, rt60: 0.6, channels: 1 })
+    : createRoomImpulse(ctx, { duration: 1.4, rt60: 1.2 });
+  let send;
+  if (reverb) {
+    send = reverb.send;
+    try { send.disconnect(); } catch (e) { /* ignore */ }
+    for (const n of [...reverb.conv, ...reverb.ret]) {
+      try { n.disconnect(); } catch (e) { /* ignore */ }
+    }
+  } else {
+    send = ctx.createGain();
+    send.gain.value = reverbToGain(reverbAmount);
+  }
+  const conv = [];
+  const ret = [];
+  for (let i = 0; i < 2; i++) {
+    const c = ctx.createConvolver();
+    c.normalize = false; // the impulse is already energy-normalized
+    c.buffer = impulse;
+    const r = ctx.createGain();
+    r.gain.value = i === 0 ? 1 : 0;
+    c.connect(r);
+    r.connect(masterGain);
+    conv.push(c);
+    ret.push(r);
+  }
+  reverb = { send, conv, ret, cur: 0, connected: false, kind };
+  if (reverbAmount > 0) connectReverbSend();
+}
+
+function connectReverbSend() {
+  if (!reverb || reverb.connected) return;
+  reverb.send.connect(reverb.conv[reverb.cur]);
+  reverb.connected = true;
+}
+
+function disconnectReverbSend() {
+  if (!reverb || !reverb.connected) return;
+  try { reverb.send.disconnect(); } catch (e) { /* ignore */ }
+  reverb.connected = false;
+}
+
+function isOffline(ac) {
+  return typeof OfflineAudioContext !== 'undefined' && ac instanceof OfflineAudioContext;
 }
 
 /** Resume the context if it is suspended/interrupted. Never rejects. */
 function resumeIfNeeded() {
-  if (!ctx || ctx.state === 'running' || ctx.state === 'closed') return Promise.resolve();
+  if (!ctx || ctx.state === 'running' || ctx.state === 'closed' || isOffline(ctx)) return Promise.resolve();
   try {
     const p = ctx.resume();
     return p && typeof p.then === 'function' ? p.catch(() => {}) : Promise.resolve();
@@ -396,13 +739,29 @@ function resumeIfNeeded() {
   }
 }
 
+/** Close the live context so the next ensureContext() creates one with the new buffer size. */
+function recreateContextIfPending() {
+  if (!recreatePending || !ctx || isOffline(ctx) || activePlaybacks.size > 0 || contextHolds > 0) return;
+  const old = ctx;
+  ctx = null;
+  masterGain = limiter = null;
+  reverb = null;
+  noiseBuffer = null;
+  try {
+    const p = old.close();
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  } catch (e) { /* ignore */ }
+}
+
 /**
  * Create (lazily) and resume the shared AudioContext.
  * Must be called from a user gesture (click) before the first sound in most
- * browsers; safe to call any number of times.
+ * browsers; safe to call any number of times. Also recovers from iOS
+ * interruptions (phone call, other app): call it from the next button press.
  * @returns {Promise<AudioContext>} the shared context (extra: the contract only requires a Promise)
  */
 export async function initAudio() {
+  recreateContextIfPending();
   ensureContext();
   await resumeIfNeeded();
   return ctx;
@@ -420,8 +779,41 @@ export function getAudioContext() {
 }
 
 /**
+ * Render engine output offline (for tests, level checks and the speed
+ * benchmark): builds the same master chain (volume, reverb, limiter) in an
+ * OfflineAudioContext, runs `build()` — which calls playNotes / playChord /
+ * startSustain ... as usual — then renders. The live context is untouched.
+ * `build` must schedule synchronously (live retuning is not rendered).
+ * @param {number} seconds
+ * @param {() => void} build
+ * @param {{sampleRate?: number, limiter?: boolean}} [opts] limiter: false = measure the
+ *   signal before the limiter (level checks)
+ * @returns {Promise<{buffer: AudioBuffer, renderMs: number}>}
+ */
+export async function renderOffline(seconds, build, { sampleRate = 48000, limiter: useLimiter = true } = {}) {
+  const OAC = globalThis.OfflineAudioContext || globalThis.webkitOfflineAudioContext;
+  if (!OAC) throw new Error('OfflineAudioContext not supported');
+  const oc = new OAC(2, Math.max(1, Math.ceil(seconds * sampleRate)), sampleRate);
+  const saved = { ctx, masterGain, limiter, reverb, noiseBuffer };
+  try {
+    ctx = oc;
+    buildGraph();
+    if (!useLimiter) {
+      masterGain.disconnect();
+      masterGain.connect(oc.destination);
+    }
+    build();
+  } finally {
+    ({ ctx, masterGain, limiter, reverb, noiseBuffer } = saved);
+  }
+  const t0 = performance.now();
+  const buffer = await oc.startRendering();
+  return { buffer, renderMs: performance.now() - t0 };
+}
+
+/**
  * Set the master volume.
- * @param {number} v 0..1 (mapped through a perceptual curve, gain = 0.85 * v^2)
+ * @param {number} v 0..1 (mapped through a perceptual curve, gain = 0.8 * v^2)
  */
 export function setMasterVolume(v) {
   const n = Number(v);
@@ -445,15 +837,24 @@ export function getMasterVolume() {
  * Set the amount of room reverb (0 = completely dry, 1 = quite roomy).
  * The reverb is a fixed linear filter: it does not change pitch or beat
  * rates. Default DEFAULT_REVERB (0.35), a small quiet room. Can be called
- * before initAudio(); the value is remembered.
+ * before initAudio(); the value is remembered. At 0 the reverb is fully
+ * disconnected (no processing at all).
  * @param {number} amount 0..1
  */
 export function setReverb(amount) {
   const n = Number(amount);
   if (!Number.isFinite(n)) return;
   reverbAmount = clamp(n, 0, 1);
-  if (ctx && reverbSend) {
-    reverbSend.gain.setTargetAtTime(reverbToGain(reverbAmount), ctx.currentTime, 0.03);
+  if (!ctx || !reverb) return;
+  clearTimeout(reverbOffTimer);
+  reverb.send.gain.setTargetAtTime(reverbToGain(reverbAmount), ctx.currentTime, 0.03);
+  if (reverbAmount > 0) {
+    connectReverbSend();
+  } else {
+    // Disconnect once the send has faded out (the tail then rings out by itself).
+    reverbOffTimer = setTimeout(() => {
+      if (reverbAmount === 0) disconnectReverbSend();
+    }, 250);
   }
 }
 
@@ -467,35 +868,25 @@ export function getReverb() {
 
 /**
  * Silence the reverb tail quickly (used by stopAll so leaving a screen or
- * pressing stop feels immediate): fade the reverb return out, swap in a
- * fresh (empty) convolver, then fade the return back in.
+ * pressing stop feels immediate): fade the current convolver's return out and
+ * switch the send to the other (idle) convolver. No new nodes, no timers.
  */
 function flushReverb() {
-  if (!ctx || !convolver || !reverbReturn || !reverbSend) return;
-  const g = reverbReturn.gain;
+  if (!ctx || !reverb || !reverb.connected) return;
   const now = ctx.currentTime;
+  const oldRet = reverb.ret[reverb.cur].gain;
   try {
-    g.cancelScheduledValues(now);
-    g.setValueAtTime(g.value, now);
-    g.linearRampToValueAtTime(0, now + STOP_FADE);
+    oldRet.cancelScheduledValues(now);
+    oldRet.setValueAtTime(oldRet.value, now);
+    oldRet.linearRampToValueAtTime(0, now + STOP_FADE);
+    reverb.send.disconnect();
+    reverb.cur = 1 - reverb.cur;
+    reverb.send.connect(reverb.conv[reverb.cur]);
+    const newRet = reverb.ret[reverb.cur].gain;
+    newRet.cancelScheduledValues(now);
+    newRet.setValueAtTime(newRet.value, now);
+    newRet.linearRampToValueAtTime(1, now + 0.02);
   } catch (e) { /* ignore */ }
-  const token = ++flushToken;
-  setTimeout(() => {
-    if (token !== flushToken || !ctx) return;
-    try {
-      reverbSend.disconnect();
-      convolver.disconnect();
-      convolver = makeConvolver();
-      reverbSend.connect(convolver);
-      convolver.connect(reverbReturn);
-    } catch (e) { /* keep the old convolver */ }
-    const t = ctx.currentTime;
-    try {
-      g.cancelScheduledValues(t);
-      g.setValueAtTime(0, t);
-      g.linearRampToValueAtTime(1, t + 0.02);
-    } catch (e) { /* ignore */ }
-  }, (STOP_FADE + 0.03) * 1000);
 }
 
 // ---------------------------------------------------------------------------
@@ -634,6 +1025,7 @@ function timbreAt(timbre, spec, freq) {
     step = Math.round(Math.log2(freq) * 6);
     key = timbre + '@' + step;
   }
+  const waveCache = getWaveCache();
   let entry = waveCache.get(key);
   if (entry) return entry;
 
@@ -776,6 +1168,12 @@ function maxOverlap(notes) {
  * @returns {{src: AudioBufferSourceNode, filt: BiquadFilterNode, env: GainNode}|null}
  */
 function addNoiseLayer(ac, nz, timbreFilters, input, freq, level, start, releaseStart, releaseEnd, nyquist) {
+  const prep = prepareNoise(ac, nz, timbreFilters, freq, level, nyquist);
+  return prep ? scheduleNoise(ac, prep, input, start, releaseStart, releaseEnd) : null;
+}
+
+/** Noise layer, part 1 (the costly part, done before reading the clock). */
+function prepareNoise(ac, nz, timbreFilters, freq, level, nyquist) {
   if (!nz || !noiseBuffer || !(level > 0)) return null;
   const filt = ac.createBiquadFilter();
   filt.type = 'bandpass';
@@ -783,10 +1181,16 @@ function addNoiseLayer(ac, nz, timbreFilters, input, freq, level, start, release
   filt.Q.value = nz.Q;
   const rms = noiseRms([filt, ...timbreFilters], nyquist);
   if (!(rms > 0)) return null;
-
   const burst = (level * dbToGain(nz.burstDb)) / rms;
-  const sus = nz.sustainDb == null ? 0 : (level * dbToGain(nz.sustainDb)) / rms;
+  // Light mode: onset only (the steady breath/bow hiss would run for the whole note).
+  const sustainDb = effectiveQuality() === 'light' ? null : nz.sustainDb;
+  const sus = sustainDb == null ? 0 : (level * dbToGain(sustainDb)) / rms;
+  return { nz, filt, burst, sus };
+}
 
+/** Noise layer, part 2: envelope and start/stop at the scheduled times. */
+function scheduleNoise(ac, prep, input, start, releaseStart, releaseEnd) {
+  const { nz, filt, burst, sus } = prep;
   const src = ac.createBufferSource();
   src.buffer = noiseBuffer;
   src.loop = true;
@@ -923,7 +1327,7 @@ function schedulePlayback(notes, opts = {}) {
   }
   node.connect(output);
   output.connect(masterGain);
-  if (reverbSend) output.connect(reverbSend); // post-fader send: stop() fades it too
+  if (reverb) output.connect(reverb.send); // post-fader send: stop() fades it too
 
   // --- loudness -----------------------------------------------------------
   // Equal-power scaling: n uncorrelated notes at 1/sqrt(n) each have the same
@@ -931,11 +1335,10 @@ function schedulePlayback(notes, opts = {}) {
   // jump in level when others enter or leave.
   const polyScale = 1 / Math.sqrt(maxOverlap(list));
 
-  // --- schedule notes -----------------------------------------------------
-  const t0 = ac.currentTime + LOOKAHEAD;
-  const voices = [];
-  let endTime = t0;
-
+  // --- phase 1: build the sound sources and compute levels -----------------
+  // (all the costly work happens BEFORE the start time is read from the
+  // clock, so a slow device can never schedule an attack in the past)
+  const prepared = [];
   for (const n of list) {
     const level = BASE_RMS * spec.trim * n.gain * polyScale; // target RMS of this note
     let osc; // the note's sound source: OscillatorNode or AudioBufferSourceNode
@@ -962,7 +1365,16 @@ function schedulePlayback(notes, opts = {}) {
       else osc.setPeriodicWave(wave);
       osc.frequency.value = n.freq; // exact, no detune, no modulation
     }
+    const noisePrep = prepareNoise(ac, spec.noise, filters, n.freq, peak > 0 ? level : 0, nyquist);
+    prepared.push({ n, osc, peak, level, zone, noisePrep });
+  }
 
+  // --- phase 2: schedule ----------------------------------------------------
+  const t0 = ac.currentTime + lookahead();
+  const voices = [];
+  let endTime = t0;
+
+  for (const { n, osc, peak, level, zone, noisePrep } of prepared) {
     const env = ac.createGain();
     env.gain.value = 0;
 
@@ -992,10 +1404,7 @@ function schedulePlayback(notes, opts = {}) {
     osc.start(start);
     osc.stop(releaseEnd + STOP_PAD);
 
-    const noise = addNoiseLayer(
-      ac, spec.noise, filters, dest, n.freq, peak > 0 ? level : 0,
-      start, releaseStart, releaseEnd, nyquist,
-    );
+    const noise = noisePrep ? scheduleNoise(ac, noisePrep, dest, start, releaseStart, releaseEnd) : null;
 
     voices.push({
       osc, env, mute, noises: noise ? [noise] : [], zone,
@@ -1062,7 +1471,7 @@ function schedulePlayback(notes, opts = {}) {
   function watch() {
     if (cleaned) return;
     const left = endTime - ac.currentTime;
-    if (left <= 0 && ac.state === 'running') {
+    if ((left <= 0 && ac.state === 'running') || ac.state === 'closed') {
       cleanup();
       finish();
       return;
@@ -1096,6 +1505,7 @@ function schedulePlayback(notes, opts = {}) {
       }
       finish();
       clearTimeout(watchdog);
+      activePlaybacks.delete(handle); // stopped: no longer counts as playing
       setTimeout(cleanup, (STOP_FADE + 0.15) * 1000);
     },
     done,
@@ -1103,8 +1513,12 @@ function schedulePlayback(notes, opts = {}) {
     endTime,
     timbre,
   };
-  activePlaybacks.add(handle);
-  return { handle, voices, nyquist, spec, filters, input, isStopped: () => stopped || cleaned };
+  if (!isOffline(ac)) activePlaybacks.add(handle); // offline renders never block the live context
+  return {
+    handle, voices, nyquist, spec, filters, input,
+    isStopped: () => stopped || cleaned,
+    wasStopped: () => stopped,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1204,6 +1618,12 @@ function glideParam(param, value, ramp) {
  *   Fade note `index` out (muted = true) or in (false) over `rampSec` (default 0.08 s, ~95 %).
  *   Switching on adds a subtle onset noise (synth timbres). Returns false if ignored.
  * @property {(index: number) => boolean|undefined} isMuted (extra)
+ * @property {(freqs: Array<number|null>, rampSec?: number) => boolean} setFreqs
+ *   Retune several notes at once (position i -> note i; null = leave as is), same glide as setFreq.
+ * @property {() => boolean} isPlaying  false once stopped or ended
+ * @property {(cb: (e: {reason: 'stopped'|'ended'}) => void) => () => void} onEnd
+ *   cb after the notes have finished: 'stopped' (stop()/stopAll()/stopEverything()) or 'ended'
+ *   (maxDuration reached and released). Returns an unsubscribe function.
  * @property {() => void} stop  Fade out quickly (~40 ms) and stop.
  * @property {Promise<void>} done Resolves when the notes have ended, or right after stop().
  * @property {string} timbre    Timbre key actually used ('organ' while a recorded timbre is not loaded).
@@ -1246,7 +1666,7 @@ export function startSustain(freqs, { timbre, maxDuration = 120, muted = [] } = 
     byIndex.set(v.index, v);
   }
 
-  return {
+  const handle = {
     setMuted(index, mute, rampSec = 0.08) {
       const v = byIndex.get(index);
       if (!v || !v.mute || pb.isStopped()) return false;
@@ -1306,12 +1726,36 @@ export function startSustain(freqs, { timbre, maxDuration = 120, muted = [] } = 
       const v = byIndex.get(index);
       return v ? v.freq : undefined;
     },
+    setFreqs(freqs, rampSec = 0.03) {
+      if (!Array.isArray(freqs)) return false;
+      let ok = true;
+      freqs.forEach((f, i) => {
+        if (f != null && !handle.setFreq(i, f, rampSec)) ok = false;
+      });
+      return ok;
+    },
+    isPlaying() {
+      return !pb.isStopped();
+    },
+    onEnd(cb) {
+      let cancelled = false;
+      pb.handle.done.then(() => {
+        if (cancelled) return;
+        try {
+          cb({ reason: pb.wasStopped() ? 'stopped' : 'ended' });
+        } catch (e) {
+          console.error('[audio] onEnd callback threw:', e);
+        }
+      });
+      return () => { cancelled = true; };
+    },
     stop: pb.handle.stop,
     done: pb.handle.done,
     timbre: pb.handle.timbre,
     startTime: pb.handle.startTime,
     endTime: pb.handle.endTime,
   };
+  return handle;
 }
 
 /** Most the recording may be boosted by playRecordingWith (+30 dB). */
@@ -1376,7 +1820,7 @@ export function playRecordingWith(buffer, freqs, { timbre, gain = 1 } = {}) {
     list.map((freq) => ({ freq, start: 0, duration: Math.max(MIN_DURATION, dur - 0.05) })),
     { timbre },
   );
-  const startTime = list.length ? pb.handle.startTime : ac.currentTime + LOOKAHEAD;
+  const startTime = list.length ? pb.handle.startTime : ac.currentTime + lookahead();
 
   // Level-match the recording to the chord (whose total RMS is about
   // BASE_RMS * trim thanks to the 1/sqrt(n) rule).
@@ -1443,9 +1887,10 @@ export function playRecordingWith(buffer, freqs, { timbre, gain = 1 } = {}) {
         fade.gain.linearRampToValueAtTime(0, now + STOP_FADE);
         src.stop(now + STOP_FADE + 0.01);
       } catch (e) { /* ignore */ }
+      activePlaybacks.delete(recHandle);
     },
   };
-  activePlaybacks.add(recHandle);
+  if (!isOffline(ac)) activePlaybacks.add(recHandle);
 
   return {
     stop() {
@@ -1467,4 +1912,45 @@ export function playRecordingWith(buffer, freqs, { timbre, gain = 1 } = {}) {
 export function stopAll() {
   for (const h of Array.from(activePlaybacks)) h.stop();
   flushReverb();
+}
+
+/**
+ * Stop every sound now: all playbacks, held/sustained notes and recording
+ * playback (short 40 ms fades), and cut the room-echo tail. Safe to call at
+ * any time, also before any sound or when nothing plays. For Esc, opening an
+ * options panel and the page being hidden.
+ */
+export function stopEverything() {
+  try {
+    stopAll();
+  } catch (e) {
+    console.error('[audio] stopEverything:', e);
+  }
+}
+
+const interruptionListeners = new Set();
+
+function notifyInterruption(state) {
+  for (const cb of Array.from(interruptionListeners)) {
+    try {
+      cb({ state });
+    } catch (e) {
+      console.error('[audio] onAudioInterrupted callback threw:', e);
+    }
+  }
+}
+
+/**
+ * Be told when the system interrupts the sound (phone call, iOS audio
+ * interruption, the OS suspending audio): cb({ state: 'interrupted' |
+ * 'suspended' }), and when it runs again: cb({ state: 'running' }).
+ * Only fires after the sound had been running. Recovery needs a user gesture
+ * on iOS: call initAudio() from the next button press (e.g. "Continue").
+ * @param {(e: {state: string}) => void} cb
+ * @returns {() => void} unsubscribe
+ */
+export function onAudioInterrupted(cb) {
+  if (typeof cb !== 'function') return () => {};
+  interruptionListeners.add(cb);
+  return () => interruptionListeners.delete(cb);
 }
